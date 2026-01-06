@@ -6,8 +6,18 @@ IMPORTANT:
 The printer must be configured as AMS, not AMS Lite.
 Using AMS Lite will cause incompatibility issues.
 
-The firmware works without any errors or warnings.
-The HMS status remains "OK" at all times.
+# IMPORTANT – HMS WARNING STATUS
+
+This firmware version **triggers an HMS warning immediately after printer startup**.
+
+Important clarification:
+- This HMS warning **does NOT block BMCU operation**
+- It does **NOT require restarting the printer**
+- It does **NOT affect printing**
+- The printer works normally despite the warning
+- The issue is **purely visual / informational** (HMS icon only)
+
+At the moment, the HMS warning is known and accepted behavior in this firmware version.
 
 ---
 
@@ -132,5 +142,3 @@ This firmware has undergone solid testing, and no issues are expected.
 - Printer: Bambu Lab A1 / A1 mini
 - Printer firmware: v1.07.01
 - Printer mode: AMS (not AMS Lite)
-- HMS status: OK
-- Errors or warnings: none
