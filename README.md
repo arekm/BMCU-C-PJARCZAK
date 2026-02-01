@@ -1,6 +1,6 @@
 # BMCU Firmware – Calibration and Compatibility Notes
 
-This BMCU firmware has been tested and verified with the latest Bambu Lab A1 firmware v1.07.01.
+This BMCU firmware has been tested and verified with the latest Bambu Lab A1 firmware v1.07.02.
 
 IMPORTANT:
 The printer must be configured as AMS, not AMS Lite.
@@ -140,5 +140,58 @@ This firmware has undergone solid testing, and no issues are expected.
 ## Tested configuration
 
 - Printer: Bambu Lab A1 / A1 mini
-- Printer firmware: v1.07.01
+- Printer firmware: v1.07.02
 - Printer mode: AMS (not AMS Lite)
+
+
+# Changelog
+
+## Framework
+- Dropped Arduino Core (PlatformIO: framework = arduino) - the whole firmware was rewritten to pure CH32 (WCH SDK / noneos).
+- Direct use of hardware timers, DMA and interrupts - no Arduino delays, no random timing, deterministic real-time behavior.
+- Faster and correct flash operations (WCH Fast API) - stable writes, faster, without corrupting neighboring data.
+
+## ADC_DMA
+- Separated DMA writes from CPU reads - previously reads happened while DMA was overwriting the buffer.
+- Filter is computed in the background (DMA half/full), not during readout - previously `get_value()` blocked CPU and broke timing.
+- Constant CPU load - previously larger filter window slowed the system down.
+- DMA error handling
+
+## BUS (BambuBus + AHUB)
+- Fixed RX/TX buffer race (reading and overwriting the same buffer at the same time).
+- Snapshot-based parsing instead of working on a live buffer
+- Deterministic frame handling timing - constant CPU cost, independent from packet length.
+- Robustness against transmission errors - a bad packet does not break the whole system state.
+
+## Flash / NVM
+- Flash written page-by-page (256B) instead of erasing/programming the whole sector (4KB)
+- Write only when data actually changed
+- Hardware CRC for flash + verification on read
+- AMS data split into separate records - changing one filament does not rewrite the whole structure.
+
+## Soft-I2C / AS5600
+- Rewritten from Arduino, removed timing bugs and Arduino "magic".
+- Correct ACK/NACK, START/STOP, recovery handling
+- Hard isolation of channels with errors
+
+## Motion / mechanics
+- Smoother motor control
+- Added calibration buffers - filament stays in a neutral position, without unnecessary tension.
+- Better state transitions - no jerks and no sudden braking.
+
+## Misc
+- CRC8 / CRC16 rewritten to simple C + lookup tables - faster, deterministic, no objects and no runtime init.
+- Partially de-spaghettified includes
+- and many more - firmware prepared for further development
+
+
+## Final note
+
+This firmware started as a personal CH32 learning project.
+During development it grew far beyond the original scope because working on BMCU turned out to be genuinely enjoyable.
+
+Many solutions are intentionally overengineered.
+Everything was implemented primarily for personal use and experimentation.
+
+The firmware has been used extensively during development,
+and no practical issues were observed in real-world usage.

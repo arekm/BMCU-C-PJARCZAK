@@ -1,0 +1,38 @@
+#pragma once
+#include <stdint.h>
+
+// API
+void Motion_control_init();
+void Motion_control_set_PWM(uint8_t CHx, int PWM);
+void Motion_control_run(int error);
+
+void MC_PULL_detect_channels_inserted();
+
+// Externy
+extern float   MC_PULL_V_OFFSET[4];
+extern float   MC_PULL_V_MIN[4];
+extern float   MC_PULL_V_MAX[4];
+extern uint8_t MC_PULL_pct[4];
+extern bool    filament_channel_inserted[4];
+
+// platformio.ini: -DBAMBU_BUS_AMS_NUM
+#ifndef BAMBU_BUS_AMS_NUM
+#define BAMBU_BUS_AMS_NUM 0
+#endif
+
+// platformio.ini: -DAMS_RETRACT_LEN
+#ifndef AMS_RETRACT_LEN
+#define AMS_RETRACT_LEN 0.2f
+#endif
+
+#ifndef motion_control_ams_num
+#define motion_control_ams_num BAMBU_BUS_AMS_NUM
+#endif
+
+#ifndef motion_control_pull_back_distance
+#define motion_control_pull_back_distance AMS_RETRACT_LEN
+#endif
+
+#if (BAMBU_BUS_AMS_NUM < 0) || (BAMBU_BUS_AMS_NUM > 3)
+#error "BAMBU_BUS_AMS_NUM must be in range 0..3"
+#endif
