@@ -46,8 +46,12 @@ void Flash_saves_init(void);
 
 // AMS: 4x 256B
 bool Flash_AMS_filament_read(uint8_t filament_idx, Flash_FilamentInfo* out);
-bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info);
+bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info, uint8_t loaded_channel);
 bool Flash_AMS_filament_clear(uint8_t filament_idx);
+
+bool Flash_AMS_state_read(uint8_t* loaded_channel);
+bool Flash_AMS_state_write(uint8_t loaded_channel, const Flash_FilamentInfo* filament0_info);
+
 
 // CAL: 1x 256B
 bool Flash_MC_PULL_cal_read(float offs[4], float vmin[4], float vmax[4]);

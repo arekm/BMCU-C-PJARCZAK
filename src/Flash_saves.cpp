@@ -110,11 +110,19 @@ static bool nvm256_read(uint32_t page_addr, uint32_t magic, uint16_t ver,
     return true;
 }
 
-bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info)
+static inline uint32_t ams_rsv_pack(uint8_t filament_idx, uint8_t loaded_ch)
+{
+    return ((uint32_t)BAMBU_BUS_AMS_NUM & 0xFFu) |
+           (((uint32_t)filament_idx & 0xFFu) << 8) |
+           (((uint32_t)loaded_ch & 0xFFu) << 16) |
+           (0xA5u << 24);
+}
+
+bool Flash_AMS_filament_write(uint8_t filament_idx, const Flash_FilamentInfo* info, uint8_t loaded_ch)
 {
     if (!info || filament_idx >= 4) return false;
 
-    const uint32_t rsv = ((uint32_t)BAMBU_BUS_AMS_NUM << 8) | (uint32_t)filament_idx;
+    const uint32_t rsv = ams_rsv_pack(filament_idx, loaded_ch);
     return nvm256_write(ams_fil_page(filament_idx), MAGIC_FIL, VER_1, rsv, info, (uint16_t)sizeof(*info));
 }
 
@@ -136,6 +144,45 @@ bool Flash_AMS_filament_clear(uint8_t filament_idx)
 {
     if (filament_idx >= 4) return false;
     return flash256_erase(ams_fil_page(filament_idx));
+}
+
+bool Flash_AMS_state_read(uint8_t* loaded_ch)
+{
+    if (!loaded_ch) return false;
+
+    Flash_FilamentInfo tmp{};
+    uint16_t got = 0;
+    uint32_t rsv = 0;
+
+    if (!nvm256_read(ams_fil_page(0), MAGIC_FIL, VER_1,
+                     &tmp, (uint16_t)sizeof(tmp), &got, &rsv))
+        return false;
+
+    if (got != sizeof(tmp)) return false;
+
+    const uint8_t marker = (uint8_t)((rsv >> 24) & 0xFFu);
+    if (marker != 0xA5u) {
+        *loaded_ch = 0xFFu;
+        return true;
+    }
+
+    uint8_t ch = (uint8_t)((rsv >> 16) & 0xFFu);
+    if (ch >= 4u) ch = 0xFFu;
+
+    *loaded_ch = ch;
+    return true;
+}
+
+bool Flash_AMS_state_write(uint8_t loaded_ch, const Flash_FilamentInfo* filament0_info)
+{
+    if (!filament0_info) return false;
+    if (loaded_ch < 4u || loaded_ch == 0xFFu) {
+        const uint32_t rsv = ams_rsv_pack(0u, loaded_ch);
+        return nvm256_write(ams_fil_page(0), MAGIC_FIL, VER_1, rsv, filament0_info, (uint16_t)sizeof(*filament0_info));
+    }
+
+    const uint32_t rsv = ams_rsv_pack(0u, 0xFFu);
+    return nvm256_write(ams_fil_page(0), MAGIC_FIL, VER_1, rsv, filament0_info, (uint16_t)sizeof(*filament0_info));
 }
 
 struct alignas(4) Flash_CAL_payload

@@ -25,6 +25,16 @@ extern bool    filament_channel_inserted[4];
 #define AMS_RETRACT_LEN 0.2f
 #endif
 
+// platformio.ini: -DBMCU_DM_TWO_MICROSWITCH=1 (DM dual microswitch + autoload assist)
+#ifndef BMCU_DM_TWO_MICROSWITCH
+#define BMCU_DM_TWO_MICROSWITCH 0
+#endif
+
+// platformio.ini: -DBMCU_ONLINE_LED_FILAMENT_RGB=1 (show filament RGB on ONLINE LED when loaded)
+#ifndef BMCU_ONLINE_LED_FILAMENT_RGB
+#define BMCU_ONLINE_LED_FILAMENT_RGB 0
+#endif
+
 #ifndef motion_control_ams_num
 #define motion_control_ams_num BAMBU_BUS_AMS_NUM
 #endif

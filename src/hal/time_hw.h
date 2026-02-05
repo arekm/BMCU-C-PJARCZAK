@@ -21,18 +21,41 @@ uint32_t time_hw_ticks_per_ms(void);
 extern uint32_t time_hw_tpus;
 extern uint32_t time_hw_tpms;
 
+static inline __attribute__((always_inline)) uint32_t time_diff_u32(uint32_t a, uint32_t b)
+{
+    return (uint32_t)(a - b);
+}
+
+static inline __attribute__((always_inline)) int time_reached32(uint32_t now, uint32_t deadline)
+{
+    return ((time_diff_u32(now, deadline) >> 31) == 0u);
+}
+
 static inline __attribute__((always_inline)) int32_t time_diff32(uint32_t a, uint32_t b)
 {
     return (int32_t)(a - b);
 }
-static inline __attribute__((always_inline)) int time_reached32(uint32_t now, uint32_t deadline)
-{
-    return (time_diff32(now, deadline) >= 0);
-}
 
 static inline __attribute__((always_inline)) uint32_t ms_to_ticks32(uint32_t ms)
 {
-    return ms * time_hw_tpms;
+    const uint32_t tpm = time_hw_ticks_per_ms();
+    if (!ms || !tpm) return 0u;
+
+    const uint32_t max_ms = 0xFFFFFFFFu / tpm;
+    if (ms > max_ms) return 0xFFFFFFFFu;
+
+    return ms * tpm;
+}
+
+static inline __attribute__((always_inline)) uint32_t us_to_ticks32(uint32_t us)
+{
+    const uint32_t tpu = time_hw_ticks_per_us();
+    if (!us || !tpu) return 0u;
+
+    const uint32_t max_us = 0xFFFFFFFFu / tpu;
+    if (us > max_us) return 0xFFFFFFFFu;
+
+    return us * tpu;
 }
 
 static inline __attribute__((always_inline)) uint32_t time_ticks32(void)

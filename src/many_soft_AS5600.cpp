@@ -114,8 +114,8 @@ void AS5600_soft_IIC_many::init(GPIO_TypeDef* const* GPIO_SCL_port, const uint16
     if (num > kMax) num = kMax;
     numbers = num;
 
-    // 10us delay w tickach policzone raz
-    g_iic_delay_ticks = 10u * time_hw_ticks_per_us();
+    // 4us delay w tickach policzone raz
+    g_iic_delay_ticks = 4u * time_hw_ticks_per_us();
     if (!g_iic_delay_ticks) g_iic_delay_ticks = 1;
 
     for (int i = 0; i < numbers; i++)

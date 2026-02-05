@@ -94,6 +94,51 @@ static int8_t MC_PULL_stu[4]            = {0, 0, 0, 0};
 
 static uint8_t MC_ONLINE_key_stu[4]     = {0, 0, 0, 0};
 
+#if BMCU_DM_TWO_MICROSWITCH
+static inline uint8_t dm_key_to_state(float v)
+{
+    if (v < 0.6f) return 0u;   // none
+    if (v > 1.7f) return 1u;   // both
+    if (v > 1.4f) return 2u;   // external only
+    return 3u;
+}
+
+// ---- DM autoload (two microswitch) ----
+static constexpr uint64_t DM_AUTO_S1_DEBOUNCE_MS       = 100ull;   // 0.1s
+static constexpr uint64_t DM_AUTO_S1_TIMEOUT_MS        = 5000ull;  // 5s
+static constexpr uint64_t DM_AUTO_S1_FAIL_RETRACT_MS   = 1500ull;  // 1.5s
+
+static constexpr float    DM_AUTO_S2_TARGET_M          = 0.120f;   // 120mm
+static constexpr float    DM_AUTO_BUF_ABORT_PCT        = 65.0f;    // abort push
+static constexpr float    DM_AUTO_BUF_RECOVER_PCT      = 50.2f;    // retract-to (try 1/2)
+static constexpr uint64_t DM_AUTO_FAIL_EXTRA_MS        = 1500ull;  // extra retract after fail
+static constexpr float    DM_AUTO_PWM_PUSH             = 900.0f;   // push strength
+static constexpr float    DM_AUTO_PWM_PULL             = 900.0f;   // retract strength
+static constexpr float    DM_AUTO_IDLE_LIM             = 950.0f;   // clamp only during autoload
+
+enum : uint8_t
+{
+    DM_AUTO_IDLE = 0,
+    DM_AUTO_S1_DEBOUNCE,
+    DM_AUTO_S1_PUSH,
+    DM_AUTO_S1_FAIL_RETRACT,
+    DM_AUTO_S2_PUSH,
+    DM_AUTO_S2_RETRACT,
+    DM_AUTO_S2_FAIL_RETRACT,
+    DM_AUTO_S2_FAIL_EXTRA,
+};
+
+static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
+static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until ks==0 (<0.6V)
+static uint8_t  dm_auto_state[4]        = {0,0,0,0};
+static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
+static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
+static float    dm_auto_remain_m[4]     = {0,0,0,0};
+static float    dm_auto_last_m[4]       = {0,0,0,0};
+
+static uint64_t dm_loaded_drop_t0_ms[4] = {0ull,0ull,0ull,0ull};
+#endif
+
 bool filament_channel_inserted[4]       = {false, false, false, false}; // czy kanał fizycznie wpięty
 
 static constexpr float MC_PULL_PIDP_PCT = 25.0f;
@@ -101,9 +146,9 @@ static constexpr float MC_PULL_PIDP_PCT = 25.0f;
 static constexpr int MC_PULL_DEADBAND_PCT_LOW  = 30;
 static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 
-static constexpr int MC_PULL_SEND_FAST_PCT     = 53;
-static constexpr int MC_PULL_SEND_STOP_PCT     = 56;
-static constexpr int MC_PULL_SEND_HARD_STOP_PCT = 70;  // bezpiecznik
+static constexpr int MC_PULL_SEND_FAST_PCT     = 56;
+static constexpr int MC_PULL_SEND_STOP_PCT     = 70;
+static constexpr int MC_PULL_SEND_HARD_STOP_PCT = 75;  // bezpiecznik
 static constexpr int MC_PULL_SEND_HARD_HYS      = 2;   // wróć dopiero < (HARD_STOP - HYS)
 
 static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
@@ -260,11 +305,17 @@ static inline void MC_PULL_ONLINE_read()
     MC_PULL_stu_raw[0] = data[6] + MC_PULL_V_OFFSET[0];
     const float key0   = data[7];
 
+#if BMCU_DM_TWO_MICROSWITCH
+    const float keyv[4] = { key0, key1, key2, key3 };
+    for (uint8_t i = 0; i < kChCount; i++)
+        MC_ONLINE_key_stu[i] = filament_channel_inserted[i] ? dm_key_to_state(keyv[i]) : 0u;
+#else
     // online key: tylko jeśli kanał fizycznie wpięty
-    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.65f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1.65f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1.65f)) ? 1u : 0u;
-    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > 1.65f)) ? 1u : 0u;
+    MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.7f)) ? 1u : 0u;
+    MC_ONLINE_key_stu[2] = (filament_channel_inserted[2] && (key2 > 1.7f)) ? 1u : 0u;
+    MC_ONLINE_key_stu[1] = (filament_channel_inserted[1] && (key1 > 1.7f)) ? 1u : 0u;
+    MC_ONLINE_key_stu[0] = (filament_channel_inserted[0] && (key0 > 1.7f)) ? 1u : 0u;
+#endif
 
 
     for (uint8_t i = 0; i < kChCount; i++)
@@ -434,7 +485,6 @@ public:
     uint64_t motor_stop_time = 0;
 
     float    post_sendout_retract_thresh_pct = -1.0f;
-    uint64_t post_sendout_until_ms = 0;
     uint8_t  retract_hys_active = 0;
 
     uint64_t send_start_ms = 0;
@@ -541,7 +591,6 @@ public:
         if (_motion == filament_motion_enum::filament_motion_send)
         {
             post_sendout_retract_thresh_pct = -1.0f;
-            post_sendout_until_ms = 0;
             retract_hys_active = 0;
         }
 
@@ -551,29 +600,22 @@ public:
             if (p < 0.0f) p = 0.0f;
             if (p > 100.0f) p = 100.0f;
             post_sendout_retract_thresh_pct = p;
-            post_sendout_until_ms = 0;
             retract_hys_active = 0;
         }
 
         if (_motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
-            if (post_sendout_retract_thresh_pct >= 0.0f)
-                post_sendout_until_ms = time_now + 10000ull;
-            else
-                post_sendout_until_ms = 0;
 
             retract_hys_active = 0;
         }
         else if (prev == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
-            post_sendout_until_ms = 0;
             post_sendout_retract_thresh_pct = -1.0f;
             retract_hys_active = 0;
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull)
         {
-            post_sendout_until_ms = 0;
             post_sendout_retract_thresh_pct = -1.0f;
             retract_hys_active = 0;
         }
@@ -598,22 +640,6 @@ public:
             pwm_zeroed)
             return;
 
-        const bool is_on_use        = (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use);
-
-        // auto-clear po 10s w ON_USE
-        if (is_on_use && post_sendout_until_ms && now_ms >= post_sendout_until_ms)
-        {
-            post_sendout_until_ms = 0;
-            post_sendout_retract_thresh_pct = -1.0f;
-            retract_hys_active = 0;
-        }
-
-        const bool post_sendout_10s =
-            is_on_use &&
-            (post_sendout_until_ms != 0) &&
-            (now_ms < post_sendout_until_ms) &&
-            (post_sendout_retract_thresh_pct >= 0.0f);
-
         if (motion != filament_motion_enum::filament_motion_stop &&
             motor_stop_time != 0 &&
             now_ms > motor_stop_time)
@@ -633,6 +659,10 @@ public:
         float speed_set = 0.0f;
         const float now_speed = speed_as5600[CHx];
         float x = 0.0f;
+#if BMCU_DM_TWO_MICROSWITCH
+        bool  dm_autoload_active = false;
+        float dm_autoload_x      = 0.0f;
+#endif
 
         // info o ostatnim wyjściu z on_use
         const uint64_t t_exit  = g_last_on_use_exit_ms[CHx];
@@ -658,9 +688,294 @@ public:
 
         bool  on_use_need_move = false;
         float on_use_abs_err   = 0.0f;
+        bool  on_use_linear    = false;
 
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
         {
+        #if BMCU_DM_TWO_MICROSWITCH
+                    // --- DM autoload (Stage1 + Stage2) ---
+                    if (filament_channel_inserted[CHx] && (dm_loaded[CHx] == 0u))
+                    {
+                        const uint8_t ks = MC_ONLINE_key_stu[CHx];
+                        auto &A = ams[motion_control_ams_num];
+                        const float cur_m = A.filament[CHx].meters;
+
+                        if (dm_fail_latch[CHx])
+                        {
+                            dm_autoload_active = true;
+                            dm_autoload_x = 0.0f;
+                            MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+                        }
+                        else
+                        {
+                            if (dm_auto_state[CHx] == DM_AUTO_IDLE)
+                            {
+                                if (ks == 2u)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
+                                    dm_auto_t0_ms[CHx] = now_ms;
+                                }
+                                else if (ks == 1u)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = DM_AUTO_S2_TARGET_M;
+                                    dm_auto_last_m[CHx]   = cur_m;
+                                }
+                            }
+
+                            switch (dm_auto_state[CHx])
+                            {
+                            case DM_AUTO_S1_DEBOUNCE:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0xFF, 0x00);
+
+                                if (ks != 2u)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                    dm_auto_t0_ms[CHx] = 0ull;
+                                }
+                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_DEBOUNCE_MS)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_S1_PUSH;
+                                    dm_auto_t0_ms[CHx] = now_ms;
+                                }
+                                break;
+
+                            case DM_AUTO_S1_PUSH:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0xFF, 0x00);
+
+                                if (ks == 0u)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                    dm_auto_t0_ms[CHx] = 0ull;
+                                }
+                                else if (ks == 1u)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_S2_PUSH;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = DM_AUTO_S2_TARGET_M;
+                                    dm_auto_last_m[CHx]   = cur_m;
+                                }
+                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_TIMEOUT_MS)
+                                {
+                                    dm_fail_latch[CHx] = 1u;
+                                    dm_auto_state[CHx] = DM_AUTO_S1_FAIL_RETRACT;
+                                    dm_auto_t0_ms[CHx] = now_ms;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = -dir * DM_AUTO_PWM_PUSH;
+                                }
+                                break;
+
+                            case DM_AUTO_S1_FAIL_RETRACT:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+
+                                if (ks == 0u)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                    dm_auto_t0_ms[CHx] = 0ull;
+                                }
+                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_S1_FAIL_RETRACT_MS)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_IDLE;
+                                    dm_auto_t0_ms[CHx] = 0ull;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                }
+                                break;
+
+                            case DM_AUTO_S2_PUSH:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0xFF, 0x00);
+
+                                if (ks != 1u)
+                                {
+                                    if (ks == 2u)
+                                    {
+                                        dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
+                                        dm_auto_t0_ms[CHx] = now_ms;
+                                    }
+                                    else
+                                    {
+                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                        dm_auto_try[CHx]      = 0u;
+                                        dm_auto_remain_m[CHx] = 0.0f;
+                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                    }
+                                    break;
+                                }
+
+                                // remain -= moved
+                                {
+                                    const float moved = absf(cur_m - dm_auto_last_m[CHx]);
+                                    dm_auto_last_m[CHx] = cur_m;
+
+                                    float r = dm_auto_remain_m[CHx] - moved;
+                                    if (r < 0.0f) r = 0.0f;
+                                    dm_auto_remain_m[CHx] = r;
+                                }
+
+                                if (MC_PULL_pct_f[CHx] > DM_AUTO_BUF_ABORT_PCT)
+                                {
+                                    uint8_t t = dm_auto_try[CHx];
+                                    if (t < 255u) t++;
+                                    dm_auto_try[CHx] = t;
+
+                                    dm_auto_last_m[CHx] = cur_m;
+
+                                    if (t >= 3u)
+                                    {
+                                        dm_fail_latch[CHx] = 1u;
+                                        dm_auto_state[CHx] = DM_AUTO_S2_FAIL_RETRACT;
+                                    }
+                                    else
+                                    {
+                                        dm_auto_state[CHx] = DM_AUTO_S2_RETRACT;
+                                    }
+
+                                    MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+                                }
+                                else if (dm_auto_remain_m[CHx] <= 0.0f)
+                                {
+                                    dm_loaded[CHx] = 1u;
+
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+
+                                    MC_STU_RGB_set(CHx, 0x38, 0x35, 0x32);
+                                    dm_autoload_x = 0.0f;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = -dir * DM_AUTO_PWM_PUSH;
+                                }
+                                break;
+
+                            case DM_AUTO_S2_RETRACT:
+                                dm_autoload_active = true;
+
+                                if (ks == 0u)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                    break;
+                                }
+
+                                // remain += moved
+                                {
+                                    const float moved = absf(cur_m - dm_auto_last_m[CHx]);
+                                    dm_auto_last_m[CHx] = cur_m;
+
+                                    float r = dm_auto_remain_m[CHx] + moved;
+                                    if (r > DM_AUTO_S2_TARGET_M) r = DM_AUTO_S2_TARGET_M;
+                                    dm_auto_remain_m[CHx] = r;
+                                }
+
+                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+
+                                if ((MC_PULL_pct_f[CHx] <= DM_AUTO_BUF_RECOVER_PCT) || (ks == 2u))
+                                {
+                                    dm_auto_last_m[CHx] = cur_m;
+
+                                    if (ks == 1u)
+                                    {
+                                        dm_auto_state[CHx] = DM_AUTO_S2_PUSH;
+                                    }
+                                    else if (ks == 2u)
+                                    {
+                                        dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
+                                        dm_auto_t0_ms[CHx] = now_ms;
+                                    }
+                                    else
+                                    {
+                                        dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                        dm_auto_try[CHx]      = 0u;
+                                        dm_auto_remain_m[CHx] = 0.0f;
+                                        dm_auto_t0_ms[CHx]    = 0ull;
+                                    }
+                                    dm_autoload_x = 0.0f;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                }
+                                break;
+
+                            case DM_AUTO_S2_FAIL_RETRACT:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+
+                                if (ks == 0u)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                }
+                                else if (ks == 2u)
+                                {
+                                    dm_auto_state[CHx] = DM_AUTO_S2_FAIL_EXTRA;
+                                    dm_auto_t0_ms[CHx] = now_ms;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                }
+                                break;
+
+                            case DM_AUTO_S2_FAIL_EXTRA:
+                                dm_autoload_active = true;
+                                MC_STU_RGB_set(CHx, 0xFF, 0x00, 0x00);
+
+                                if (ks == 0u)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                }
+                                else if ((now_ms - dm_auto_t0_ms[CHx]) >= DM_AUTO_FAIL_EXTRA_MS)
+                                {
+                                    dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                    dm_auto_try[CHx]      = 0u;
+                                    dm_auto_remain_m[CHx] = 0.0f;
+                                    dm_auto_t0_ms[CHx]    = 0ull;
+                                }
+                                else
+                                {
+                                    dm_autoload_x = dir * DM_AUTO_PWM_PULL;
+                                }
+                                break;
+
+                            default:
+                                dm_auto_state[CHx]    = DM_AUTO_IDLE;
+                                dm_auto_try[CHx]      = 0u;
+                                dm_auto_remain_m[CHx] = 0.0f;
+                                dm_auto_t0_ms[CHx]    = 0ull;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (dm_autoload_active)
+                    {
+                        x = dm_autoload_x;
+                        PID_pressure.clear();
+                        PID_speed.clear();
+                    }
+                    else
+        #endif
+
             if (MC_ONLINE_key_stu[CHx] == 0)
             {
                 if (!filament_channel_inserted[CHx] || !had_on_use)
@@ -684,18 +999,32 @@ public:
                     else
                     {
                         const float pct = MC_PULL_pct_f[CHx];
-                        const float err = pct - 49.0f;   // ujemny => pchanie
+                        const float err = pct - 49.0f;
 
                         on_use_need_move = true;
                         on_use_abs_err   = (err < 0.0f) ? -err : err;
 
-                        x = dir * PID_pressure.caculate(err, time_E);
+                        if (err < 0.0f && pct <= 51.6f && pct >= 50.0f)
+                        {
+                            float t = (51.6f - pct) / (51.6f - 50.0f);
+                            if (t < 0.0f) t = 0.0f;
+                            if (t > 1.0f) t = 1.0f;
 
-                        float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                        if (lim_f > 900.0f) lim_f = 900.0f;
+                            float pwm = 420.0f + (700.0f - 420.0f) * t;
 
-                        if (x >  lim_f) x =  lim_f;
-                        if (x < -lim_f) x = -lim_f;
+                            x = -dir * pwm;
+                            PID_pressure.clear();
+                        }
+                        else
+                        {
+                            x = dir * PID_pressure.caculate(err, time_E);
+
+                            float lim_f = 500.0f + 80.0f * on_use_abs_err;
+                            if (lim_f > 900.0f) lim_f = 900.0f;
+
+                            if (x >  lim_f) x =  lim_f;
+                            if (x < -lim_f) x = -lim_f;
+                        }
 
                         // tylko pchanie (zakaz cofania)
                         if (x * dir > 0.0f)
@@ -777,8 +1106,8 @@ public:
             {
                 const float pct = MC_PULL_pct_f[CHx];
 
-                constexpr float hold_target = 52.0f;
-                constexpr float band_lo     = 51.7f;
+                constexpr float hold_target = 54.0f;
+                constexpr float band_lo     = 53.7f;
 
                 float thresh = post_sendout_retract_thresh_pct;
                 if (thresh < hold_target) thresh = hold_target;
@@ -816,8 +1145,13 @@ public:
                 {
                     retract_hys_active = 0;
 
-                    // PUSH-only PID do 52%
-                    if (pct >= band_lo)
+                    constexpr float push_hi_pct = band_lo;
+                    constexpr float push_lo_pct = 52.0f;
+                    constexpr float pwm_hi      = 600.0f;
+                    constexpr float pwm_lo      = 900.0f;
+                    constexpr float slope       = (pwm_lo - pwm_hi) / (push_hi_pct - push_lo_pct);
+
+                    if (pct >= push_hi_pct)
                     {
                         x = 0.0f;
                         PID_pressure.clear();
@@ -826,26 +1160,16 @@ public:
                     }
                     else
                     {
-                        const float err = pct - hold_target; // ujemny => pchanie
+                        float pwm;
+                        if (pct <= push_lo_pct) pwm = pwm_lo;
+                        else                    pwm = pwm_hi + (push_hi_pct - pct) * slope;
+
+                        x = -dir * pwm;
+                        PID_pressure.clear();
+
                         on_use_need_move = true;
-                        on_use_abs_err   = -err;
-
-                        x = dir * PID_pressure.caculate(err, time_E);
-
-                        float lim_f = 550.0f + 90.0f * on_use_abs_err;
-                        if (lim_f > 950.0f) lim_f = 950.0f;
-
-                        if (x >  lim_f) x =  lim_f;
-                        if (x < -lim_f) x = -lim_f;
-
-                        // zakaz cofania
-                        if (x * dir > 0.0f)
-                        {
-                            x = 0.0f;
-                            PID_pressure.clear();
-                            on_use_need_move = false;
-                            on_use_abs_err   = 0.0f;
-                        }
+                        on_use_abs_err   = hold_target - pct;
+                        on_use_linear    = true;
                     }
                 }
             }
@@ -923,113 +1247,67 @@ public:
             {
                 const float pct = MC_PULL_pct_f[CHx];
 
-                constexpr float target_pct = 51.0f;
-                constexpr float band_lo    = 50.5f;
-                constexpr float band_hi    = 54.0f;
+                constexpr float target_pct = 52.0f;
+                constexpr float band_lo    = 51.7f;
+                constexpr float band_hi    = 59.0f;
 
-                if (post_sendout_10s)
+                constexpr float pwm_lo   = 420.0f;
+                constexpr float pct_fast_onuse  = 50.0f;
+                constexpr float pwm_fast_onuse  = 780.0f;
+                constexpr float pwm_cap  = 900.0f;
+
+                constexpr float slope = (pwm_fast_onuse - pwm_lo) / (band_lo - pct_fast_onuse);
+
+                retract_hys_active = 0;
+
+                if (pct >= band_lo && pct <= band_hi)
                 {
-                    float thresh = post_sendout_retract_thresh_pct;
-                    if (thresh < target_pct) thresh = target_pct;
+                    x = 0.0f;
+                    PID_pressure.clear();
+                    on_use_need_move = false;
+                    on_use_abs_err   = 0.0f;
+                }
+                else if (pct < band_lo)
+                {
+                    const float err = pct - target_pct;
+                    on_use_need_move = true;
+                    on_use_abs_err   = -err;
 
-                    if (pct > thresh)
-                    {
-                        const float target = thresh;
-
-                        const float start_retract = target + 0.25f;
-                        const float stop_retract  = target + 0.00f;
-
-                        retract_hys_active = hyst_u8(retract_hys_active, pct, start_retract, stop_retract);
-
-                        if (!retract_hys_active)
-                        {
-                            x = 0.0f;
-                            PID_pressure.clear();
-                            on_use_need_move = false;
-                            on_use_abs_err   = 0.0f;
-                        }
-                        else
-                        {
-                            const float err = pct - target;
-                            on_use_need_move = true;
-                            on_use_abs_err   = err;
-
-                            const float mag = retract_mag_from_err(err, 900.0f);
-
-                            x = dir * mag; // tylko cofanie
-                            if (x * dir < 0.0f) x = 0.0f;
-                        }
-                    }
+                    float pwm;
+                    if (pct >= pct_fast_onuse)
+                        pwm = pwm_lo + (band_lo - pct) * slope;
                     else
-                    {
-                        retract_hys_active = 0;
+                        pwm = pwm_fast_onuse + (pct_fast_onuse - pct) * slope;
 
-                        // push-only do target (bez cofania do targetu)
-                        if (pct >= band_lo)
-                        {
-                            x = 0.0f;
-                            PID_pressure.clear();
-                            on_use_need_move = false;
-                            on_use_abs_err   = 0.0f;
-                        }
-                        else
-                        {
-                            const float err = pct - target_pct;
-                            on_use_need_move = true;
-                            on_use_abs_err   = -err;
+                    if (pwm > pwm_cap) pwm = pwm_cap;
 
-                            x = dir * PID_pressure.caculate(err, time_E);
-
-                            float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                            if (lim_f > 900.0f) lim_f = 900.0f;
-
-                            if (x >  lim_f) x =  lim_f;
-                            if (x < -lim_f) x = -lim_f;
-
-                            if (x * dir > 0.0f)
-                            {
-                                x = 0.0f;
-                                PID_pressure.clear();
-                                on_use_need_move = false;
-                                on_use_abs_err   = 0.0f;
-                            }
-                        }
-                    }
+                    x = -dir * pwm;
+                    PID_pressure.clear();
+                    on_use_linear = true;
                 }
                 else
                 {
-                    retract_hys_active = 0;
+                    on_use_need_move = true;
 
-                    if (pct >= band_lo && pct <= band_hi)
+                    const float err = pct - target_pct;
+                    on_use_abs_err = (err < 0.0f) ? -err : err;
+
+                    x = dir * PID_pressure.caculate(err, time_E);
+
+                    float lim_f = 500.0f + 80.0f * on_use_abs_err;
+                    if (lim_f > 900.0f) lim_f = 900.0f;
+
+                    if (x >  lim_f) x =  lim_f;
+                    if (x < -lim_f) x = -lim_f;
+
+                    constexpr float retrig = 55.0f;
+                    if (err > 0.0f && pct >= retrig)
                     {
-                        x = 0.0f;
-                        PID_pressure.clear();
-                        on_use_need_move = false;
-                    }
-                    else
-                    {
-                        on_use_need_move = true;
-
-                        const float err = pct - target_pct;
-                        on_use_abs_err = (err < 0.0f) ? -err : err;
-
-                        x = dir * PID_pressure.caculate(err, time_E);
-
-                        float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                        if (lim_f > 900.0f) lim_f = 900.0f;
-
-                        if (x >  lim_f) x =  lim_f;
-                        if (x < -lim_f) x = -lim_f;
-
-                        constexpr float retrig = 55.0f;
-                        if (err > 0.0f && pct >= retrig)
-                        {
-                            float mul = 1.0f + 0.5f * (pct - retrig);
-                            if (mul > 3.0f) mul = 3.0f;
-                            x *= mul;
-                            if (x >  950.0f) x =  950.0f;
-                            if (x < -950.0f) x = -950.0f;
-                        }
+                        float mul = 1.0f + 0.5f * (pct - retrig);
+                        if (mul > 3.0f) mul = 3.0f;
+                        x *= mul;
+                        if (x >  950.0f) x =  950.0f;
+                        if (x < -950.0f) x = -950.0f;
                     }
                 }
             }
@@ -1141,7 +1419,7 @@ public:
                     {
                         if (!send_hold)
                         {
-                            speed_set = 50.0f;
+                            speed_set = 60.0f;
                         }
                         else
                         {
@@ -1224,8 +1502,8 @@ public:
 
         float pwm0 =
             pb_mode ? 0.0f :
-            (hold_mode ? 300.0f :
-             (send_hold_mode ? 350.0f : pwm_zero));
+            (hold_mode ? 420.0f :
+             (send_hold_mode ? 600.0f : pwm_zero));
 
         if (pull_mode)
         {
@@ -1238,22 +1516,37 @@ public:
             if (pwm0 < PULL_PWM_MIN) pwm0 = PULL_PWM_MIN;
         }
 
-        // friction offset
-        if (x > (float)deadband)       x += pwm0;
-        else if (x < (float)-deadband) x -= pwm0;
-        else                           x = 0.0f;
+        if (x > (float)deadband)
+        {
+            if (x < pwm0) x = pwm0;
+        }
+        else if (x < (float)-deadband)
+        {
+            if (-x < pwm0) x = -pwm0;
+        }
+        else
+        {
+            x = 0.0f;
+        }
 
         // clamp
         if (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle)
         {
+        #if BMCU_DM_TWO_MICROSWITCH
+            const float lim = dm_autoload_active ? DM_AUTO_IDLE_LIM : 800.0f;
+            if (x >  lim) x =  lim;
+            if (x < -lim) x = -lim;
+        #else
             constexpr float PWM_IDLE_LIM = 800.0f;
             if (x >  PWM_IDLE_LIM) x =  PWM_IDLE_LIM;
             if (x < -PWM_IDLE_LIM) x = -PWM_IDLE_LIM;
-        } else {
+        #endif
+        }
+        else
+        {
             if (x >  (float)PWM_lim) x =  (float)PWM_lim;
             if (x < (float)-PWM_lim) x = (float)-PWM_lim;
         }
-
 
         // ON_USE: min PWM + anty-stall
         static float    stall_s[4] = {0,0,0,0};
@@ -1272,13 +1565,16 @@ public:
 
             if (on_use_need_move && x != 0.0f)
             {
-                const int MIN_MOVE_PWM = (on_use_abs_err >= 1.3f) ? 500 : 0;
-                if (MIN_MOVE_PWM)
+                if (!on_use_linear)
                 {
-                    int xi = (int)(x + ((x >= 0.0f) ? 0.5f : -0.5f));
-                    const int ax = (xi < 0) ? -xi : xi;
-                    if (ax < MIN_MOVE_PWM)
-                        x = (x > 0.0f) ? (float)MIN_MOVE_PWM : (float)-MIN_MOVE_PWM;
+                    const int MIN_MOVE_PWM = (on_use_abs_err >= 1.3f) ? 500 : 0;
+                    if (MIN_MOVE_PWM)
+                    {
+                        int xi = (int)(x + ((x >= 0.0f) ? 0.5f : -0.5f));
+                        const int ax = (xi < 0) ? -xi : xi;
+                        if (ax < MIN_MOVE_PWM)
+                            x = (x > 0.0f) ? (float)MIN_MOVE_PWM : (float)-MIN_MOVE_PWM;
+                    }
                 }
             }
 
@@ -1310,6 +1606,11 @@ public:
                 stall_s[CHx] = 0.0f;
             }
         }
+        else
+        {
+            stall_s[CHx] = 0.0f;
+            block_until_ms[CHx] = 0ull;
+        }
 
         if (motion == filament_motion_enum::filament_motion_redetect)
         {
@@ -1339,16 +1640,17 @@ public:
             float rate_up   = 4500.0f;
             float rate_down = 6500.0f;
 
+            if (pull_soft_start) rate_up = 2500.0f;
+
             if (send_soft_start && !send_hold) rate_up = 2500.0f;
-            if (pull_soft_start)               rate_up = 2500.0f;
 
             if (motion == filament_motion_enum::filament_motion_send)
             {
                 rate_down = 25000.0f;
 
-                if (send_hold)
+                if (!send_soft_start)
                 {
-                    rate_up = 3000.0f;
+                    rate_up = send_hold ? 10000.0f : 18000.0f;
                 }
             }
 
@@ -1358,15 +1660,31 @@ public:
             if (max_step_up   < 1.0f) max_step_up   = 1.0f;
             if (max_step_down < 1.0f) max_step_down = 1.0f;
 
-
             const float prev = x_prev[CHx];
-            float lo = prev - max_step_down;
-            float hi = prev + max_step_up;
+            const float lo = prev - max_step_down;
+            const float hi = prev + max_step_up;
 
             if (x < lo) x = lo;
             if (x > hi) x = hi;
         }
 
+        // force minimum drive
+        if (motion == filament_motion_enum::filament_motion_send)
+        {
+            if (x != 0.0f && (x * dir) < 0.0f)
+            {
+                if (absf(x) < 700.0f)
+                    x = (x < 0.0f) ? -700.0f : 700.0f;
+            }
+        }
+        else if (motion == filament_motion_enum::filament_motion_before_on_use)
+        {
+            if (x != 0.0f && (x * dir) < 0.0f)
+            {
+                if (absf(x) < 600.0f)
+                    x = (x < 0.0f) ? -600.0f : 600.0f;
+            }
+        }
 
         const int pwm_out = (int)x;
         pwm_zeroed = (pwm_out == 0);
@@ -1414,26 +1732,35 @@ int32_t as5600_distance_save[4] = {0,0,0,0};
 
 void AS5600_distance_updata()
 {
-    static uint32_t last_us = 0;
+    static uint32_t last_ticks = 0;
+    static uint8_t  have_last_ticks = 0;
     static uint8_t  was_ok[4] = {0,0,0,0};
 
-    static uint32_t last_stu_ms = 0;
+    static uint32_t last_stu_ticks = 0;
 
-    const uint32_t now_ms = millis();
-    if ((uint32_t)(now_ms - last_stu_ms) >= 200u)
+    const uint32_t now_ticks = time_ticks32();
+    const uint32_t tpm  = time_hw_ticks_per_ms();
+    const uint32_t tpus = time_hw_ticks_per_us();
+
+    if ((uint32_t)(now_ticks - last_stu_ticks) >= (200u * tpm))
     {
-        last_stu_ms = now_ms;
+        last_stu_ticks = now_ticks;
         MC_AS5600.updata_stu();
     }
 
-    const uint32_t now_us = micros();
-    if (last_us == 0) { last_us = now_us; return; }
+    if (!have_last_ticks)
+    {
+        last_ticks = now_ticks;
+        have_last_ticks = 1;
+        return;
+    }
 
-    const uint32_t dt_us = (uint32_t)(now_us - last_us);
-    if (dt_us == 0) return;
-    last_us = now_us;
+    const uint32_t dt_ticks = (uint32_t)(now_ticks - last_ticks);
+    if (dt_ticks == 0) return;
+    last_ticks = now_ticks;
 
-    const float inv_dt = 1000000.0f / (float)dt_us;
+    // inv_dt = 1 / dt_s = 1e6*tpus / dt_ticks
+    const float inv_dt = (1000000.0f * (float)tpus) / (float)dt_ticks;
 
     MC_AS5600.updata_angle();
     auto &A = ams[motion_control_ams_num];
@@ -1722,7 +2049,13 @@ static void motor_motion_switch(uint64_t time_now)
             default:
                 filament_now_position[num] = filament_idle;
                 MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_pressure_ctrl_idle, 100, time_now);
+                #if BMCU_DM_TWO_MICROSWITCH
+                if (dm_fail_latch[num])      MC_STU_RGB_set(num, 0xFF, 0x00, 0x00);
+                else if (dm_loaded[num])     MC_STU_RGB_set(num, 0x38, 0x35, 0x32);
+                else                         MC_STU_RGB_set(num, 0x00, 0x00, 0x00);
+                #else
                 MC_STU_RGB_set(num, 0x38, 0x35, 0x32);
+                #endif
                 break;
             }
         }
@@ -1730,14 +2063,108 @@ static void motor_motion_switch(uint64_t time_now)
         {
             filament_now_position[num] = filament_idle;
             MOTOR_CONTROL[num].set_motion(filament_motion_enum::filament_motion_pressure_ctrl_idle, 100, time_now);
-            MC_STU_RGB_set(num, 0x38, 0x35, 0x32);
+            MC_STU_RGB_set(num, 0x00, 0x00, 0x00);
         }
     }
 }
 
+static inline void stu_apply_baseline(int error)
+{
+    for (uint8_t i = 0; i < kChCount; i++)
+    {
+#if BMCU_DM_TWO_MICROSWITCH
+        if (dm_fail_latch[i])
+        {
+            MC_STU_RGB_set(i, 0xFF, 0x00, 0x00);
+            continue;
+        }
+
+        const bool ins_ok = error ? true : filament_channel_inserted[i];
+        const bool show_loaded =
+            (dm_loaded[i] != 0u) &&
+            (MC_ONLINE_key_stu[i] != 0u) &&
+            ins_ok;
+
+        if (show_loaded) MC_STU_RGB_set(i, 0x38, 0x35, 0x32);
+        else             MC_STU_RGB_set(i, 0x00, 0x00, 0x00);
+#else
+        if (error)
+        {
+            if (MC_ONLINE_key_stu[i] != 0) MC_STU_RGB_set(i, 0x38, 0x35, 0x32);
+            else                           MC_STU_RGB_set(i, 0x00, 0x00, 0x00);
+        }
+        else
+        {
+            if (MC_ONLINE_key_stu[i] != 0 && filament_channel_inserted[i])
+                MC_STU_RGB_set(i, 0x38, 0x35, 0x32);
+            else
+                MC_STU_RGB_set(i, 0x00, 0x00, 0x00);
+        }
+#endif
+    }
+}
+
+
 static void motor_motion_run(int error)
 {
     const uint64_t time_now = get_time64();
+
+    #if BMCU_DM_TWO_MICROSWITCH
+        for (uint8_t ch = 0; ch < kChCount; ch++)
+        {
+            if (!filament_channel_inserted[ch])
+            {
+                dm_loaded[ch]            = 1u;
+                dm_fail_latch[ch]        = 0u;
+                dm_auto_state[ch]        = DM_AUTO_IDLE;
+                dm_auto_try[ch]          = 0u;
+                dm_auto_t0_ms[ch]        = 0ull;
+                dm_auto_remain_m[ch]     = 0.0f;
+                dm_auto_last_m[ch]       = 0.0f;
+                dm_loaded_drop_t0_ms[ch] = 0ull;
+                continue;
+            }
+
+            const uint8_t ks = MC_ONLINE_key_stu[ch];
+
+            // (<0.6V)
+            if (ks == 0u)
+            {
+                dm_loaded[ch]            = 0u;
+                dm_fail_latch[ch]        = 0u;
+                dm_auto_state[ch]        = DM_AUTO_IDLE;
+                dm_auto_try[ch]          = 0u;
+                dm_auto_t0_ms[ch]        = 0ull;
+                dm_auto_remain_m[ch]     = 0.0f;
+                dm_auto_last_m[ch]       = 0.0f;
+                dm_loaded_drop_t0_ms[ch] = 0ull;
+                continue;
+            }
+
+            // (>1.7V) stays stable for 100ms
+            if (dm_loaded[ch] && (ks != 1u))
+            {
+                uint64_t t0 = dm_loaded_drop_t0_ms[ch];
+                if (t0 == 0ull) dm_loaded_drop_t0_ms[ch] = time_now;
+                else if ((time_now - t0) >= 100ull)
+                {
+                    dm_loaded[ch]            = 0u;
+                    dm_loaded_drop_t0_ms[ch] = 0ull;
+
+                    dm_auto_state[ch]    = DM_AUTO_IDLE;
+                    dm_auto_try[ch]      = 0u;
+                    dm_auto_t0_ms[ch]    = 0ull;
+                    dm_auto_remain_m[ch] = 0.0f;
+                    dm_auto_last_m[ch]   = 0.0f;
+                }
+            }
+            else
+            {
+                dm_loaded_drop_t0_ms[ch] = 0ull;
+            }
+        }
+    #endif
+
     static uint64_t time_last = 0;
 
     if (time_last == 0) { time_last = time_now; return; }
@@ -1748,8 +2175,12 @@ static void motor_motion_run(int error)
 
     const float time_E = (float)dt_ms * 0.001f;
     time_last = time_now;
+    stu_apply_baseline(error);
 
     const uint16_t device_type = bus_host_device_type;
+#if BMCU_ONLINE_LED_FILAMENT_RGB
+    auto &Acol = ams[motion_control_ams_num];
+#endif
 
     if (!error)
     {
@@ -1783,19 +2214,50 @@ static void motor_motion_run(int error)
         }
         MOTOR_CONTROL[i].run(time_E, time_now);
 
-        if (MC_PULL_stu[i] == 1) {
-            MC_PULL_ONLINE_RGB_set(i, 0x10, 0x00, 0x00);
-        } else if (MC_PULL_stu[i] == -1) {
-            MC_PULL_ONLINE_RGB_set(i, 0x00, 0x00, 0x10);
-        } else {
-            if (MC_ONLINE_key_stu[i] != 0) {
-                MC_PULL_ONLINE_RGB_set(i, 0x00, 0x00, 0x00);
-            } else {
-                const uint8_t pct = MC_PULL_pct[i];
-                if ((uint8_t)(pct - 49u) <= 2u) MC_PULL_ONLINE_RGB_set(i, 0x10, 0x08, 0x00);
-                else MC_PULL_ONLINE_RGB_set(i, 0x00, 0x00, 0x00);
+        // ONLINE LED
+        uint8_t r = 0u, g = 0u, b = 0u;
+        bool is_filament_rgb = false;
+
+        const int8_t stu = MC_PULL_stu[i];
+        if (stu > 0)
+        {
+            // high pressure
+            r = 0x10u;
+        }
+        else if (stu < 0)
+        {
+            // low pressure
+            b = 0x10u;
+        }
+        else
+        {
+            const uint8_t key = MC_ONLINE_key_stu[i];
+
+#if BMCU_ONLINE_LED_FILAMENT_RGB
+    #if BMCU_DM_TWO_MICROSWITCH
+            const bool show_filament_rgb = (key == 1u) && dm_loaded[i] && !dm_fail_latch[i];
+    #else
+            const bool show_filament_rgb = (key != 0u);
+    #endif
+            if (show_filament_rgb)
+            {
+                r = Acol.filament[i].color_R;
+                g = Acol.filament[i].color_G;
+                b = Acol.filament[i].color_B;
+                is_filament_rgb = true;
+            }
+            else
+#endif
+            {
+                if (key == 0u)
+                {
+                    const uint8_t pct = MC_PULL_pct[i];
+                    if ((uint8_t)(pct - 49u) <= 2u) { r = 0x10u; g = 0x08u; }
+                }
             }
         }
+
+        MC_PULL_ONLINE_RGB_set(i, r, g, b, is_filament_rgb);
     }
 }
 
@@ -1859,26 +2321,6 @@ void Motion_control_run(int error)
             A.filament[i].online = true;
         else
             A.filament[i].online = false;
-    }
-
-    if (error)
-    {
-        for (uint8_t i = 0; i < kChCount; i++)
-        {
-            A.filament[i].online = false;
-            if (MC_ONLINE_key_stu[i] != 0) MC_STU_RGB_set(i, 0x38, 0x35, 0x32);
-            else MC_STU_RGB_set(i, 0x00, 0x00, 0x00);
-        }
-    }
-    else
-    {
-        for (uint8_t i = 0; i < kChCount; i++)
-        {
-            if (MC_ONLINE_key_stu[i] != 0 && filament_channel_inserted[i])
-                MC_STU_RGB_set(i, 0x38, 0x35, 0x32);
-            else
-                MC_STU_RGB_set(i, 0x00, 0x00, 0x00);
-        }
     }
 
     motor_motion_run(error);

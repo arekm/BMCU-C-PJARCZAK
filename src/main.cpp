@@ -30,16 +30,18 @@ void RGB_update()
           RGBOUT[2].is_dirty() || RGBOUT[3].is_dirty()))
         return;
 
-    static uint32_t next = 0;
-    static uint32_t period = 0;
+    static uint64_t next   = 0;
+    static uint64_t period = 0;
 
-    if (!period) {
-        uint32_t p = 50u * (uint32_t)time_hw_tpms;
-        period = (p ? p : 1u);
+    if (!period)
+    {
+        const uint32_t tpm = time_hw_ticks_per_ms();
+        uint64_t p = (uint64_t)tpm * 50ull;           // 50ms
+        period = (p ? p : 1ull);
     }
 
-    const uint32_t now = time_ticks32();
-    if ((int32_t)(now - next) < 0) return;
+    const uint64_t now = time_ticks64();
+    if (now < next) return;
 
     next = now + period;
 
@@ -50,7 +52,9 @@ void RGB_update()
     RGBOUT[3].updata();
 }
 
-static uint8_t g_fil_dirty = 0;
+static uint8_t g_fil_dirty   = 0;
+static uint8_t g_loaded_ch   = 0xFF;
+static uint8_t g_state_dirty = 0;
 
 static inline void ram_to_flashinfo(uint8_t fil, Flash_FilamentInfo* o)
 {
@@ -119,6 +123,33 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
     g_fil_dirty |= (1u << filament_idx);
 }
 
+void ams_state_set_loaded(uint8_t filament_ch)
+{
+    if (filament_ch >= 4u) return;
+    if (g_loaded_ch == filament_ch) return;
+    g_loaded_ch = filament_ch;
+    g_state_dirty = 1;
+}
+
+void ams_state_set_unloaded(void)
+{
+    if (g_loaded_ch == 0xFFu) return;
+    g_loaded_ch = 0xFFu;
+    g_state_dirty = 1;
+}
+
+static void ams_state_save_run()
+{
+    if (!g_state_dirty) return;
+
+    Flash_FilamentInfo fi0;
+    ram_to_flashinfo(0, &fi0);
+
+    if (Flash_AMS_state_write(g_loaded_ch, &fi0))
+        g_state_dirty = 0;
+}
+
+
 void ams_datas_save_run()
 {
     // zapisuje max 1 stronę (256B) na iterację pętli
@@ -134,7 +165,7 @@ void ams_datas_save_run()
     ram_to_flashinfo(fil, &now);
 
     // jeśli brak zmian, Flash_AMS_filament_write -> flash256_prog() zrobi memcmp i zwróci true bez erase/program
-    if (Flash_AMS_filament_write(fil, &now))
+    if (Flash_AMS_filament_write(fil, &now, g_loaded_ch))
         g_fil_dirty &= ~(1u << fil);
 }
 
@@ -155,6 +186,7 @@ int main(void)
     GPIO_PinRemapConfig(GPIO_Remap_PD01, ENABLE);
 
     RGB_init();
+    delay(10);
 
     SYS_RGB.set_RGB(0x10, 0x00, 0x00, 0);
     for (int i = 0; i < 4; i++) RGBOUT[i].set_RGB(0, 0, 0, 0);
@@ -171,6 +203,28 @@ int main(void)
     MC_PULL_calibration_boot();
 
     ams_datas_read();
+
+    {
+        uint8_t ch = 0xFFu;
+        if (Flash_AMS_state_read(&ch))
+        {
+            g_loaded_ch = ch;
+
+            if (ch < 4u)
+            {
+                _ams* a = &ams[BAMBU_BUS_AMS_NUM];
+
+                a->now_filament_num  = ch;
+                a->filament_use_flag = 0x04;
+                a->pressure          = 0x2B00;
+
+                for (uint8_t i = 0; i < 4u; i++)
+                    a->filament[i].motion = _filament_motion::idle;
+
+                a->filament[ch].motion = _filament_motion::on_use;
+            }
+        }
+    }
 
     ADC_DMA_poll();
     Motion_control_init();
@@ -208,6 +262,7 @@ int main(void)
                 }
 
                 ams_datas_save_run();
+                ams_state_save_run();
             }
             else
             {

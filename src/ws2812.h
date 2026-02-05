@@ -2,6 +2,10 @@
 #include <stdint.h>
 #include "ch32v20x.h"
 
+#ifndef BMCU_ONLINE_LED_FILAMENT_RGB
+#define BMCU_ONLINE_LED_FILAMENT_RGB 0
+#endif
+
 class WS2812_class
 {
 public:
@@ -15,10 +19,7 @@ public:
 
     void set_RGB(uint8_t R, uint8_t G, uint8_t B, uint8_t index);
 
-    inline void set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index)
-    {
-        set_RGB(R, G, B, index);
-    }
+    void set_RGB_online(uint8_t R, uint8_t G, uint8_t B, uint8_t index, bool filament = false);
 
     inline bool is_dirty() const { return dirty; }
 
@@ -29,6 +30,10 @@ private:
 
     // GRB packed: [23:16]=G, [15:8]=R, [7:0]=B
     uint32_t last_grb[MAX_NUM] = {0u, 0u, 0u, 0u};
+
+    // cache tylko pod ONLINE/filament (porównujemy surowe RGB)
+    uint32_t last_online_raw_rgb[MAX_NUM]   = {0u, 0u, 0u, 0u}; // RGB packed
+    uint8_t  last_online_is_filament[MAX_NUM] = {0u, 0u, 0u, 0u};
 
     bool dirty = false;
 };

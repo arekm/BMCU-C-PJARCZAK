@@ -25,18 +25,50 @@ At the moment, the HMS warning is known and accepted behavior in this firmware v
 
 - Bambu Lab A1
 - Bambu Lab A1 mini
+- Bambu Lab P1S
 
 Other printers may also work, but they have not been tested.
 
 ---
 
-## Folder structure
+## Download
 
-SOLO/
-AMS_A/
-AMS_B/
-AMS_C/
-AMS_D/
+Please download ready-to-use firmware from the **"Releases"** section (right side of the GitHub page).
+All firmware variants are generated there together with **.txt guides** that explain which build you should choose.
+
+---
+
+## Folder structure (generated firmware)
+
+Firmware is generated into this tree:
+
+firmwares/
+- AUTOLOAD/
+    - FILAMENT_RGB_ON/
+        - SOLO/
+        - AMS_A/
+        - AMS_B/
+        - AMS_C/
+        - AMS_D/
+    - FILAMENT_RGB_OFF/
+        - SOLO/
+        - AMS_A/
+        - AMS_B/
+        - AMS_C/
+        - AMS_D/
+- NO_AUTOLOAD/
+    - FILAMENT_RGB_ON/
+        - SOLO/
+        - AMS_A/
+        - AMS_B/
+        - AMS_C/
+        - AMS_D/
+    - FILAMENT_RGB_OFF/
+        - SOLO/
+        - AMS_A/
+        - AMS_B/
+        - AMS_C/
+        - AMS_D/
 
 ---
 
@@ -143,8 +175,48 @@ This firmware has undergone solid testing, and no issues are expected.
 - Printer firmware: v1.07.02
 - Printer mode: AMS (not AMS Lite)
 
+---
 
 # Changelog
+
+## V7
+
+### User-visible changes
+- **Remember loaded filaments (persistent state).**  
+  You can load filament and safely power off the printer.  
+  This allows you to disable the automatic unload-at-end behavior in G-code (if you often print with one filament),
+  keeping filament loaded until you actually need to change it.  
+  More info here: https://wiki.bambulab.com/en/ams/manual/ams-not-unloading-to-save-filament
+- **100% solved filament loading problems.** The system is stable and consistent across hardware variants.
+- **Filament RGB colors.** Modules/LEDs can display the configured filament color.
+
+### AUTOLOAD (short)
+**How AUTOLOAD works**
+- **DM (two microswitches):**
+    - Touch first switch → AUTOLOAD starts (you may need a light manual push until gears grab).
+    - BMCU feeds filament until the second switch (behind extruder) confirms **fully inserted**.
+    - Then it feeds 120 mm to make it print-ready.
+    - **Anti-snag protection:** buffer position is monitored; if the filament catches on housing / PTFE edge, it retracts to safe position and retries (3 retries).
+- **Single-switch boards:**
+    - Stage 1 is manual (no second switch to confirm fully-in).
+    - Once filament is fully in the extruder, Stage 2 behaves the same (incl. anti-snag protection).
+
+### Technical changes
+- **ADC_DMA upgraded (ADC1 + ADC2 in parallel):**
+    - Regular simultaneous mode: ADC1+ADC2 scan channels in parallel to reduce noise and increase throughput.
+    - Lower noise enabled smaller filtering and faster stable readout.
+    - Full filtered update time: **~5 ms instead of ~28 ms**.
+- **AS5600 reading correctness improved** (robustness and stability of reads).
+- **Timer/tick safety (wrap safety):** all time comparisons reviewed to be correct under wrap-around.
+- Final stabilization and cleanup: overall behavior is faster and more deterministic than previous releases.
+- There were more fixes in V7 as well; easiest is to check the commit history.
+
+**Final note:** all known issues were ultimately resolved. BMCU is fully stable and significantly faster vs older firmware.
+At this moment I do not expect any further fixes.
+
+---
+
+## V6
 
 ## Framework
 - Dropped Arduino Core (PlatformIO: framework = arduino) - the whole firmware was rewritten to pure CH32 (WCH SDK / noneos).
