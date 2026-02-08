@@ -307,8 +307,82 @@ static inline void MC_PULL_ONLINE_read()
 
 #if BMCU_DM_TWO_MICROSWITCH
     const float keyv[4] = { key0, key1, key2, key3 };
+
+    // --- Buffer Gesture Load  ---
+    static uint32_t gst_t0[4]     = {0,0,0,0};
+    static uint8_t  gst_step[4]   = {0,0,0,0};      // 0=idle, 1=wait_low, 2=wait_return
+    static bool     gst_active[4] = {false,false,false,false};
+    static uint32_t gst_act_t0[4] = {0,0,0,0};
+
+    const uint32_t now_ms = time_ticks32() / time_hw_ticks_per_ms();
+
     for (uint8_t i = 0; i < kChCount; i++)
-        MC_ONLINE_key_stu[i] = filament_channel_inserted[i] ? dm_key_to_state(keyv[i]) : 0u;
+    {
+        // Kanał nie wpięty - reset FSM, zero stanu
+        if (!filament_channel_inserted[i])
+        {
+            gst_step[i] = 0;
+            gst_active[i] = false;
+            gst_t0[i] = 0;
+            gst_act_t0[i] = 0;
+            MC_ONLINE_key_stu[i] = 0u;
+            continue;
+        }
+
+        // Jak DM fail-latch jest aktywny - NIE trzymaj wirtualnego switcha, bo latch kasuje się dopiero przy ks==0 (<0.6V)
+        if (dm_fail_latch[i])
+        {
+            gst_step[i] = 0;
+            gst_active[i] = false;
+        }
+
+        // skip jak aktywne pobieranie
+        if (!gst_active[i])
+        {
+            const float pct_f = pull_v_to_percent_f(i, MC_PULL_stu_raw[i]);
+
+            if (gst_step[i] == 0)
+            {
+                if (pct_f < 10.0f) { gst_step[i] = 1; gst_t0[i] = now_ms; }
+            }
+            else if (gst_step[i] == 1)
+            {
+                if (pct_f > 15.0f) { gst_step[i] = 0; }
+                else if ((uint32_t)(now_ms - gst_t0[i]) >= 100u)
+                {
+                    gst_step[i] = 2;
+                }
+            }
+            else // gst_step == 2
+            {
+                if ((uint32_t)(now_ms - gst_t0[i]) > 2000u)
+                {
+                    gst_step[i] = 0;
+                }
+                else if (pct_f >= 45.0f && pct_f <= 55.0f)
+                {
+                    gst_active[i] = true;
+                    gst_act_t0[i] = now_ms;
+                    gst_step[i] = 0;
+                }
+            }
+        }
+
+        // Obsługa aktywności
+        if (gst_active[i])
+        {
+            if (keyv[i] > 1.7f) gst_active[i] = false;
+            else if ((uint32_t)(now_ms - gst_act_t0[i]) > 5500u) gst_active[i] = false;
+        }
+
+        const uint8_t phys = dm_key_to_state(keyv[i]);
+        uint8_t state = phys;
+
+        if (gst_active[i] && (phys == 0u)) state = 2u;
+
+        MC_ONLINE_key_stu[i] = state;
+    }
+    // --- End Buffer Gesture Load  ---
 #else
     // online key: tylko jeśli kanał fizycznie wpięty
     MC_ONLINE_key_stu[3] = (filament_channel_inserted[3] && (key3 > 1.7f)) ? 1u : 0u;
