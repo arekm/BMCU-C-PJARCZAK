@@ -126,16 +126,22 @@ void ams_datas_set_need_to_save_filament(uint8_t filament_idx)
 void ams_state_set_loaded(uint8_t filament_ch)
 {
     if (filament_ch >= 4u) return;
-    if (g_loaded_ch == filament_ch) return;
+    if (g_loaded_ch != 0xFFu) return;
     g_loaded_ch = filament_ch;
     g_state_dirty = 1;
 }
 
-void ams_state_set_unloaded(void)
+void ams_state_set_unloaded(uint8_t filament_ch)
 {
     if (g_loaded_ch == 0xFFu) return;
+    if (filament_ch < 4u && g_loaded_ch != filament_ch) return;
     g_loaded_ch = 0xFFu;
     g_state_dirty = 1;
+}
+
+uint8_t ams_state_get_loaded(void)
+{
+    return g_loaded_ch;
 }
 
 static void ams_state_save_run()

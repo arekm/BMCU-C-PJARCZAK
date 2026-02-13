@@ -19,6 +19,12 @@ Important clarification:
 
 At the moment, the HMS warning is known and accepted behavior in this firmware version.
 
+If the HMS warning in Bambu Studio annoys you:
+I made a Bambu Studio build that bypasses this specific AMS compatibility warning, so you do not see it anymore.
+Other HMS warnings will still be visible (if they happen), so HMS remains useful.
+
+https://github.com/jarczakpawel/BambuStudio-BMCU
+
 ---
 
 ## Supported printers
@@ -36,39 +42,83 @@ Other printers may also work, but they have not been tested.
 Please download ready-to-use firmware from the **"Releases"** section (right side of the GitHub page).
 All firmware variants are generated there together with **.txt guides** that explain which build you should choose.
 
+Start by selecting the correct printer mode folder first (standard(A1) or high_force_load(P1S)), then choose AUTOLOAD / RGB / slots as usual.
+
+## Flashing
+
+Flashing tutorial:
+https://wiki.yuekai.fr/BMCU/BMCU_Tutorial/BMCU_Flashing
+
+IMPORTANT:
+- Use **wchisptool-v3.3** exactly as shown in the tutorial (do not use newer versions).
+- Do NOT flash the BMCU while it is connected to the printer.
+- Do NOT connect/disconnect the BMCU while the printer is powered on (risk of damaging the BMCU and/or the printer mainboard).
+
+Please do not ask me how to flash the BMCU.
+I receive too many such questions - this is documented online and should be asked elsewhere if needed.
+
 ---
 
 ## Folder structure (generated firmware)
 
-Firmware is generated into this tree:
+Firmware is generated into this tree (choose printer mode folder first):
 
 firmwares/
-- AUTOLOAD/
-    - FILAMENT_RGB_ON/
-        - SOLO/
-        - AMS_A/
-        - AMS_B/
-        - AMS_C/
-        - AMS_D/
-    - FILAMENT_RGB_OFF/
-        - SOLO/
-        - AMS_A/
-        - AMS_B/
-        - AMS_C/
-        - AMS_D/
-- NO_AUTOLOAD/
-    - FILAMENT_RGB_ON/
-        - SOLO/
-        - AMS_A/
-        - AMS_B/
-        - AMS_C/
-        - AMS_D/
-    - FILAMENT_RGB_OFF/
-        - SOLO/
-        - AMS_A/
-        - AMS_B/
-        - AMS_C/
-        - AMS_D/
+- standard(A1)/
+    - AUTOLOAD/
+        - FILAMENT_RGB_ON/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+        - FILAMENT_RGB_OFF/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+    - NO_AUTOLOAD/
+        - FILAMENT_RGB_ON/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+        - FILAMENT_RGB_OFF/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+
+- high_force_load(P1S)/
+    - AUTOLOAD/
+        - FILAMENT_RGB_ON/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+        - FILAMENT_RGB_OFF/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+    - NO_AUTOLOAD/
+        - FILAMENT_RGB_ON/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
+        - FILAMENT_RGB_OFF/
+            - SOLO/
+            - AMS_A/
+            - AMS_B/
+            - AMS_C/
+            - AMS_D/
 
 ---
 
@@ -121,7 +171,7 @@ Without proper calibration, BMCU will not work correctly.
 
 The calibration process is shown in the following video:
 
-https://www.youtube.com/shorts/Hn_DNzSmhuc
+https://www.youtube.com/watch?v=Hn_DNzSmhuc
 
 Follow the calibration steps shown in the video carefully.
 
@@ -143,11 +193,20 @@ Steps:
 - Do not flash BMCU while it is connected to the printer
 - Do not disconnect BMCU while the printer is powered on
 - Do not update printer firmware while BMCU is connected
+- Connect/disconnect the BMCU ONLY when the printer is completely powered off (unplugged). Doing this while powered can damage the BMCU and/or the printer mainboard.
 
 These recommendations are based on community reports.
 Not all failure scenarios have been tested.
 
 Changing the printer mode from AMS Lite to AMS while BMCU was connected did not cause issues in testing, but this is not recommended.
+
+---
+
+## Disclaimer
+
+You are using this firmware and performing any modifications at your own risk.
+Make sure you understand what you are doing.
+I am not responsible for any damage, failed prints, hardware issues, or data loss.
 
 ---
 
@@ -161,6 +220,23 @@ Please do not ask:
 These topics are well documented online and will not be answered.
 
 ---
+
+## Before opening a bug report
+
+Please verify the basics first:
+
+- Make sure you flashed the correct firmware variant and followed the flashing tutorial correctly.
+- Make sure you really have **BMCU 370C with Hall sensors**.
+    - The only reliable verification is to open the module and inspect the PCB.
+    - Some sellers mix modules and try to get rid of older **370x** boards - sometimes 1-2 modules in the set can be 370x.
+- If you have printer-side issues:
+    - confirm you are on the latest printer firmware
+    - do a factory reset (this often fixes weird AMS-related behavior)
+- If filament detection behaves strangely:
+    - boot the printer once without BMCU connected
+    - then connect BMCU and test again
+- Do a few real tests before creating a thread.
+  Printers can have unrelated issues (rare, but happens) - some users cannot even update printer firmware automatically and must do it via SD card.
 
 ## Bug reports
 
@@ -178,6 +254,17 @@ This firmware has undergone solid testing, and no issues are expected.
 ---
 
 # Changelog
+
+## V8
+
+### User-visible changes
+- Supported print resume after a printer power reset / power loss (printing can be resumed properly).
+- Improved behavior for **P1S** (loading problems due to long/bent PTFE path).
+- Added AUTOLOAD support for **single-switch PCB** boards:
+    - Triggered by pressing the buffer ("buffer tap").
+    - Starts filament loading exactly like the external switch trigger.
+- More stable loading process overall.
+- Improved support for **low-torque BMCU** variants.
 
 ## V7
 

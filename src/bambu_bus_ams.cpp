@@ -207,20 +207,38 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
         {
             const uint8_t ch = (uint8_t)read_num;
 
-            const bool need_select =
-                ((statu_flags == 0x03) && (fliment_motion_flag == 0x00)) ||  // 03 00 => send_out
-                ((statu_flags == 0x09) && (fliment_motion_flag == 0xA5)) ||  // 09 A5 => before_on_use
-                ((statu_flags == 0x07) && (fliment_motion_flag == 0x00)) ||  // 07 00 => stop_on_use
-                ((statu_flags == 0x07) && (fliment_motion_flag == 0x7F)) ||  // 07 7F => on_use
-                ((statu_flags == 0x09) && (fliment_motion_flag == 0x3F));    // 09 3F => before_pull_back
+            const bool is_send_out      = ((statu_flags == 0x03) && (fliment_motion_flag == 0x00));
+            const bool is_before_on_use = ((statu_flags == 0x09) && (fliment_motion_flag == 0xA5));
+            const bool is_stop_on_use   = ((statu_flags == 0x07) && (fliment_motion_flag == 0x00));
+            const bool is_on_use        = ((statu_flags == 0x07) && (fliment_motion_flag == 0x7F));
+            const bool is_before_pullb  = ((statu_flags == 0x09) && (fliment_motion_flag == 0x3F));
 
-            if (need_select)
+            uint8_t loaded = 0xFFu;
+            bool allow_any = true;
+            bool allow_stop = true;
+
+            if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+            {
+                loaded = ams_state_get_loaded();
+                allow_any  = (loaded == 0xFFu) || (loaded == ch);
+                allow_stop = (loaded == ch);
+            }
+
+            const bool accept =
+                (is_send_out) ||
+                (is_before_on_use && allow_any) ||
+                (is_on_use        && allow_any) ||
+                (is_stop_on_use   && allow_stop) ||
+                (is_before_pullb  && allow_stop);
+
+            if (accept)
             {
                 if (ams_ptr->now_filament_num != ch)
                 {
                     if (ams_ptr->now_filament_num < 4)
                     {
-                        ams_ptr->filament[ams_ptr->now_filament_num].motion = _filament_motion::idle;
+                        const uint8_t prev = ams_ptr->now_filament_num;
+                        ams_ptr->filament[prev].motion = _filament_motion::idle;
                         ams_ptr->filament_use_flag = 0x00;
                         ams_ptr->pressure = 0xFFFF;
                     }
@@ -229,37 +247,63 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 }
             }
 
-            if ((statu_flags == 0x03) && (fliment_motion_flag == 0x00)) // 03 00 => SEND_OUT
+            if (is_send_out)
             {
+                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+                {
+                    const _filament_motion prev = ams_ptr->filament[ch].motion;
+
+                    if (prev != _filament_motion::send_out && ams_state_get_loaded() != 0xFFu)
+                        ams_state_set_unloaded(0xFFu);
+                }
+
                 ams_ptr->filament[ch].motion = _filament_motion::send_out;
                 ams_ptr->filament_use_flag   = 0x02;
                 ams_ptr->pressure            = 0x4700;
             }
-            else if ((statu_flags == 0x09) && (fliment_motion_flag == 0xA5)) // 09 A5 => BEFORE_ON_USE
+            else if (is_before_on_use)
             {
+                if (!allow_any) return true;
+
                 const _filament_motion prev = ams_ptr->filament[ch].motion;
 
                 ams_ptr->filament[ch].motion = _filament_motion::before_on_use;
                 ams_ptr->filament_use_flag   = 0x04;
                 ams_ptr->pressure = (prev == _filament_motion::send_out) ? 0x4700 : 0x2B00;
+
+                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+                    ams_state_set_loaded(ch);
             }
-            else if ((statu_flags == 0x07) && (fliment_motion_flag == 0x00)) // 07 00 => STOP_ON_USE
+            else if (is_stop_on_use)
             {
+                if (!allow_stop) return true;
+
                 const _filament_motion prev = ams_ptr->filament[ch].motion;
 
-                ams_ptr->filament[ch].motion = _filament_motion::stop_on_use;
-                ams_ptr->filament_use_flag   = 0x04;
+                if (prev == _filament_motion::on_use ||
+                    prev == _filament_motion::before_on_use)
+                {
+                    ams_ptr->filament[ch].motion = _filament_motion::stop_on_use;
+                }
 
+                ams_ptr->filament_use_flag   = 0x04;
                 ams_ptr->pressure = (prev == _filament_motion::send_out) ? 0x4700 : 0x2B00;
             }
-            else if ((statu_flags == 0x07) && (fliment_motion_flag == 0x7F)) // 07 7F => ON_USE
+            else if (is_on_use)
             {
+                if (!allow_any) return true;
+
                 ams_ptr->filament[ch].motion = _filament_motion::on_use;
                 ams_ptr->filament_use_flag   = 0x04;
                 ams_ptr->pressure            = 0x2B00;
+
+                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+                    ams_state_set_loaded(ch);
             }
-            else if ((statu_flags == 0x09) && (fliment_motion_flag == 0x3F)) // 09 3F => BEFORE_PULLBACK
+            else if (is_before_pullb)
             {
+                if (!allow_stop) return true;
+
                 const _filament_motion prev = ams_ptr->filament[ch].motion;
 
                 if (prev == _filament_motion::on_use ||
@@ -271,24 +315,19 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
 
                 ams_ptr->filament_use_flag = 0x04;
                 ams_ptr->pressure = 0x2B00;
+
+                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+                    ams_state_set_unloaded(ch);
             }
             else if (statu_flags == 0x09)
             {
                 ams_ptr->filament_use_flag = 0x04;
                 ams_ptr->pressure          = 0x2B00;
             }
-            if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
-            {
-                const uint8_t ch = (uint8_t)read_num;
-                if (ams_ptr->filament_use_flag == 0x04)
-                    ams_state_set_loaded(ch);
-                else
-                    ams_state_set_unloaded();
-            }
         }
         else if (read_num == 0xFF)
         {
-            if ((statu_flags == 0x03) && (fliment_motion_flag == 0x00)) // 03 00(FF) => wejście w pull_back
+            if ((statu_flags == 0x03) && (fliment_motion_flag == 0x00)) // wejście w pull_back
             {
                 if (ams_ptr->now_filament_num < 4)
                 {
@@ -301,25 +340,39 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                         m == _filament_motion::stop_on_use)
                     {
                         ams_ptr->filament[ch].motion = _filament_motion::pull_back;
-                        ams_ptr->filament_use_flag = 0x02;
+                        ams_ptr->filament_use_flag   = 0x02;
                     }
 
                     ams_ptr->pressure = 0x4700;
-                }
 
-                if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
-                    ams_state_set_unloaded();
+                    if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
+                        ams_state_set_unloaded(ch);
+                }
             }
             else if (statu_flags == 0x01)
             {
                 if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
                 {
-                    if (ams_ptr->filament_use_flag != 0x04)
-                        ams_state_set_unloaded();
+                    const uint8_t ch = ams_ptr->now_filament_num;
+                    if (ch < 4 && ams_ptr->filament_use_flag != 0x04)
+                        ams_state_set_unloaded(ch);
                 }
             }
             else
             {
+                if (ams_ptr->now_filament_num < 4)
+                {
+                    const uint8_t ch = ams_ptr->now_filament_num;
+                    const _filament_motion m = ams_ptr->filament[ch].motion;
+
+                    if (m == _filament_motion::on_use ||
+                        m == _filament_motion::before_on_use ||
+                        m == _filament_motion::stop_on_use)
+                    {
+                        return true;
+                    }
+                }
+
                 for (uint8_t i = 0; i < 4; i++)
                     ams_ptr->filament[i].motion = _filament_motion::idle;
 
@@ -328,7 +381,7 @@ bool set_motion(unsigned char read_num, unsigned char statu_flags, unsigned char
                 ams_ptr->now_filament_num  = 0xFF;
 
                 if (ams_num == (uint8_t)BAMBU_BUS_AMS_NUM)
-                    ams_state_set_unloaded();
+                    ams_state_set_unloaded(0xFFu); // global clear
             }
         }
     }

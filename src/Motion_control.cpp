@@ -26,21 +26,20 @@ static inline float retract_mag_from_err(float err, float mag_max)
     if (err < e1)
     {
         float t = (err - e0) / (e1 - e0);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
+        t = clampf(t, 0.0f, 1.0f);
         mag = 450.0f + 100.0f * t;
     }
     else
     {
         float t = (err - e1) / (e2 - e1);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
+        t = clampf(t, 0.0f, 1.0f);
         mag = 550.0f + 300.0f * t;
     }
 
     if (mag > mag_max) mag = mag_max;
     return mag;
 }
+
 
 static inline uint8_t hyst_u8(uint8_t active, float v, float start, float stop)
 {
@@ -74,7 +73,7 @@ static constexpr uint8_t kAS5600_OK_RECOVER  = 2;
 static inline bool AS5600_is_good(uint8_t ch) { return g_as5600_good[ch] != 0; }
 
 // ---- liniowe zwalnianie końcówki + minimalny PWM ----
-static constexpr float PULL_V_FAST   = 50.0f;   // mm/s
+static constexpr float PULL_V_FAST   = 60.0f;   // mm/s
 static constexpr float PULL_V_END    = 12.0f;   // mm/s na samym końcu
 static constexpr float PULL_RAMP_M   = 0.015f;  // 15mm strefa hamowania
 static constexpr float PULL_PWM_MIN  = 400.0f;  // "kop" przy pullback
@@ -131,6 +130,7 @@ enum : uint8_t
 static uint8_t  dm_loaded[4]            = {1,1,1,1};   // 1=loaded (after stage2 success)
 static uint8_t  dm_fail_latch[4]        = {0,0,0,0};   // latch until ks==0 (<0.6V)
 static uint8_t  dm_auto_state[4]        = {0,0,0,0};
+static uint8_t dm_autoload_gate[4]      = {0,0,0,0}; // 0=allow Stage1, 1=block Stage1 until idle+ks==0
 static uint8_t  dm_auto_try[4]          = {0,0,0,0};   // abort count (stage2)
 static uint64_t dm_auto_t0_ms[4]        = {0ull,0ull,0ull,0ull};
 static float    dm_auto_remain_m[4]     = {0,0,0,0};
@@ -146,10 +146,39 @@ static constexpr float MC_PULL_PIDP_PCT = 25.0f;
 static constexpr int MC_PULL_DEADBAND_PCT_LOW  = 30;
 static constexpr int MC_PULL_DEADBAND_PCT_HIGH = 70;
 
-static constexpr int MC_PULL_SEND_FAST_PCT     = 56;
-static constexpr int MC_PULL_SEND_STOP_PCT     = 70;
-static constexpr int MC_PULL_SEND_HARD_STOP_PCT = 75;  // bezpiecznik
-static constexpr int MC_PULL_SEND_HARD_HYS      = 2;   // wróć dopiero < (HARD_STOP - HYS)
+// ================ LOAD CONTROL ======================
+#if BMCU_P1S  // P1S
+    // Stage1
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 85;
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 95;  // bezpiecznik
+    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;   // wróć dopiero < (HARD_STOP - HYS)
+    // Stage2 (hold_load)
+    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 90.0f;
+    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 1.0f;   // push_hi = hold_target - delta
+    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 80.0f;  // start push PWM
+    static constexpr float MC_LOAD_S2_PWM_HI             = 600.0f;
+    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
+    // ===== ON_USE CONTROL =====
+    static constexpr float MC_ON_USE_TARGET_PCT    = 54.0f;
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.3f;  // band_lo = target - delta
+    static constexpr float MC_ON_USE_BAND_HI_PCT   = 65.0f;
+#else        // A1
+    // Stage1
+    static constexpr int   MC_LOAD_S1_FAST_PCT       = 70;
+    static constexpr int   MC_LOAD_S1_HARD_STOP_PCT  = 80;  // bezpiecznik
+    static constexpr int   MC_LOAD_S1_HARD_HYS       = 2;   // wróć dopiero < (HARD_STOP - HYS)
+    // Stage2 (hold_load)
+    static constexpr float MC_LOAD_S2_HOLD_TARGET_PCT    = 75.0f;
+    static constexpr float MC_LOAD_S2_HOLD_BAND_LO_DELTA = 0.3f;   // push_hi = hold_target - delta
+    static constexpr float MC_LOAD_S2_PUSH_START_PCT     = 65.0f;  // start push PWM
+    static constexpr float MC_LOAD_S2_PWM_HI             = 480.0f;
+    static constexpr float MC_LOAD_S2_PWM_LO             = 1000.0f;
+    // ===== ON_USE CONTROL =====
+    static constexpr float MC_ON_USE_TARGET_PCT    = 52.0f;
+    static constexpr float MC_ON_USE_BAND_LO_DELTA = 0.2f;  // band_lo = target - delta
+    static constexpr float MC_ON_USE_BAND_HI_PCT   = 60.0f;
+#endif
+// ====================================================
 
 static constexpr uint32_t CAL_RESET_HOLD_MS     = 5000;
 static constexpr int      CAL_RESET_PCT_THRESH  = 15;
@@ -225,26 +254,25 @@ static float pull_v_to_percent_f(uint8_t ch, float v)
     float pos01;
     if (v <= c)
     {
-        float den = (c - vmin);
+        float den = c - vmin;
         if (den < 0.05f) den = 0.05f;
         pos01 = 0.5f * (v - vmin) / den;
     }
     else
     {
-        float den = (vmax - c);
+        float den = vmax - c;
         if (den < 0.05f) den = 0.05f;
         pos01 = 0.5f + 0.5f * (v - c) / den;
     }
 
-    pos01 = clampf(pos01, 0.0f, 1.0f);
-    return pos01 * 100.0f;
+    return clampf(pos01, 0.0f, 1.0f) * 100.0f;
 }
 
 void MC_PULL_detect_channels_inserted()
 {
     if (!ADC_DMA_is_inited())
     {
-        for (int ch = 0; ch < 4; ch++) filament_channel_inserted[ch] = false;
+        for (uint8_t ch = 0; ch < kChCount; ch++) filament_channel_inserted[ch] = false;
         return;
     }
 
@@ -252,36 +280,27 @@ void MC_PULL_detect_channels_inserted()
     ADC_DMA_filter_reset();
     (void)ADC_DMA_wait_full();
 
+    constexpr uint8_t idx[kChCount] = {6,4,2,0};
     constexpr int N = 16;
-    float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    float s[kChCount] = {0,0,0,0};
 
     for (int i = 0; i < N; i++)
     {
         const float *v = ADC_DMA_get_value();
-
-        s0 += v[6];
-        s1 += v[4];
-        s2 += v[2];
-        s3 += v[0];
-
+        for (uint8_t ch = 0; ch < kChCount; ch++) s[ch] += v[idx[ch]];
         delay(2);
     }
 
-    const float a0 = s0 / (float)N;
-    const float a1 = s1 / (float)N;
-    const float a2 = s2 / (float)N;
-    const float a3 = s3 / (float)N;
-
     constexpr float VMIN = 0.30f;
     constexpr float VMAX = 3.00f;
+    constexpr float invN = 1.0f / (float)N;
 
-    filament_channel_inserted[0] = (a0 > VMIN) && (a0 < VMAX);
-    filament_channel_inserted[1] = (a1 > VMIN) && (a1 < VMAX);
-    filament_channel_inserted[2] = (a2 > VMIN) && (a2 < VMAX);
-    filament_channel_inserted[3] = (a3 > VMIN) && (a3 < VMAX);
+    for (uint8_t ch = 0; ch < kChCount; ch++)
+    {
+        const float a = s[ch] * invN;
+        filament_channel_inserted[ch] = (a > VMIN) && (a < VMAX);
+    }
 }
-
-
 
 static inline void MC_PULL_ONLINE_init()
 {
@@ -425,13 +444,9 @@ static inline void MC_PULL_ONLINE_read()
 
     if ((num != 0xFF) && (num < kChCount) && filament_channel_inserted[num])
     {
-        int pct = (int)MC_PULL_pct[num];
-        int hi  = pct - 50;
-        if (hi < 0) hi = 0;
-        if (hi > 50) hi = 50;
-
-        const uint32_t pressure = (uint32_t)((hi * 65535u) / 50u);
-        A.pressure = (int)pressure;
+        const uint8_t pct = MC_PULL_pct[num];
+        const uint32_t hi = (pct > 50u) ? (uint32_t)(pct - 50u) : 0u;
+        A.pressure = (int)((hi * 65535u) / 50u);
     }
     else
     {
@@ -560,11 +575,14 @@ public:
 
     float    post_sendout_retract_thresh_pct = -1.0f;
     uint8_t  retract_hys_active = 0;
+    float    on_use_hi_gate_pct = -1.0f;
+    uint64_t on_use_hi_gate_t0_ms = 0ull;
 
     uint64_t send_start_ms = 0;
-    uint64_t pull_start_ms = 0;
+    float    send_start_m  = 0.0f;
+    uint8_t  send_len_abort = 0;
 
-    uint64_t send_stop_brake_ms = 0;
+    uint64_t pull_start_ms = 0;
 
     bool send_stop_latch = false;
 
@@ -576,10 +594,7 @@ public:
 
     static float x_prev[4];
 
-    bool  send_hold = false;
     bool  send_hard = false;
-    float send_base = 0.0f;
-    float send_pct_prev = 50.0f;
 
     _MOTOR_CONTROL(int _CHx) : CHx(_CHx) {}
 
@@ -603,6 +618,8 @@ public:
         if (_motion == filament_motion_enum::filament_motion_send) {
             send_start_ms = time_now;
             send_stop_latch = false;
+            send_len_abort = 0;
+            send_start_m = ams[motion_control_ams_num].filament[CHx].meters;
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull) {
@@ -614,6 +631,8 @@ public:
         {
             send_start_ms = 0;
             send_stop_latch = false;
+            send_len_abort = 0;
+            send_start_m = 0.0f;
         }
 
         if (prev == filament_motion_enum::filament_motion_pull &&
@@ -645,14 +664,13 @@ public:
         // SEND reset
         if (_motion == filament_motion_enum::filament_motion_send)
         {
-            send_hold = false; send_hard = false; send_base = 0.0f;
-            send_pct_prev = MC_PULL_pct_f[CHx];
+            send_hard = false;
         }
 
         if (prev == filament_motion_enum::filament_motion_send &&
             _motion != filament_motion_enum::filament_motion_send)
         {
-            send_hold = false; send_hard = false; send_base = 0.0f;
+            send_hard = false;
         }
 
         PID_speed.clear();
@@ -668,7 +686,7 @@ public:
             retract_hys_active = 0;
         }
 
-        if (_motion == filament_motion_enum::filament_motion_before_on_use)
+        if (_motion == filament_motion_enum::filament_motion_before_on_use || _motion == filament_motion_enum::filament_motion_stop_on_use)
         {
             float p = MC_PULL_pct_f[CHx];
             if (p < 0.0f) p = 0.0f;
@@ -679,13 +697,31 @@ public:
 
         if (_motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
-
             retract_hys_active = 0;
+            float p = MC_PULL_pct_f[CHx];
+            if (p < 0.0f) p = 0.0f;
+            if (p > 100.0f) p = 100.0f;
+
+            post_sendout_retract_thresh_pct = p;
+
+            if (prev == filament_motion_enum::filament_motion_before_on_use ||
+                prev == filament_motion_enum::filament_motion_stop_on_use)
+            {
+                on_use_hi_gate_pct   = p;
+                on_use_hi_gate_t0_ms = time_now;
+            }
+            else
+            {
+                on_use_hi_gate_pct   = -1.0f;
+                on_use_hi_gate_t0_ms = 0ull;
+            }
         }
         else if (prev == filament_motion_enum::filament_motion_pressure_ctrl_on_use)
         {
             post_sendout_retract_thresh_pct = -1.0f;
-            retract_hys_active = 0;
+            retract_hys_active   = 0;
+            on_use_hi_gate_pct   = -1.0f;
+            on_use_hi_gate_t0_ms = 0ull;
         }
 
         if (_motion == filament_motion_enum::filament_motion_pull)
@@ -706,6 +742,87 @@ public:
     }
 
     filament_motion_enum get_motion() { return motion; }
+
+    static inline void hold_load(
+        float pct,
+        float dir,
+        MOTOR_PID &PID_pressure,
+        float &post_sendout_retract_thresh_pct,
+        uint8_t &retract_hys_active,
+        float &x,
+        bool  &on_use_need_move,
+        float &on_use_abs_err,
+        bool  &on_use_linear
+    )
+    {
+        constexpr float hold_target = MC_LOAD_S2_HOLD_TARGET_PCT;
+
+        float thresh = post_sendout_retract_thresh_pct;
+        if (thresh < hold_target) thresh = hold_target;
+
+        if (pct > thresh)
+        {
+            const float target = thresh;
+
+            const float start_retract = target + 0.25f;
+            const float stop_retract  = target + 0.00f;
+
+            retract_hys_active = hyst_u8(retract_hys_active, pct, start_retract, stop_retract);
+
+            if (!retract_hys_active)
+            {
+                x = 0.0f;
+                PID_pressure.clear();
+                on_use_need_move = false;
+                on_use_abs_err   = 0.0f;
+                on_use_linear    = false;
+            }
+            else
+            {
+                const float err = pct - target;
+                on_use_need_move = true;
+                on_use_abs_err   = err;
+                on_use_linear    = false;
+
+                const float mag = retract_mag_from_err(err, 850.0f);
+
+                x = dir * mag;
+                if (x * dir < 0.0f) x = 0.0f;
+            }
+        }
+        else
+        {
+            retract_hys_active = 0;
+
+            constexpr float push_hi_pct    = hold_target - MC_LOAD_S2_HOLD_BAND_LO_DELTA;
+            constexpr float push_start_pct = MC_LOAD_S2_PUSH_START_PCT;
+            constexpr float pwm_hi         = MC_LOAD_S2_PWM_HI;
+            constexpr float pwm_lo         = MC_LOAD_S2_PWM_LO;
+            constexpr float slope          = (pwm_lo - pwm_hi) / (push_hi_pct - push_start_pct);
+
+            if (pct >= push_hi_pct)
+            {
+                x = 0.0f;
+                PID_pressure.clear();
+                on_use_need_move = false;
+                on_use_abs_err   = 0.0f;
+                on_use_linear    = false;
+            }
+            else
+            {
+                float pwm;
+                if (pct <= push_start_pct) pwm = pwm_lo;
+                else                       pwm = pwm_hi + (push_hi_pct - pct) * slope;
+
+                x = -dir * pwm;
+                PID_pressure.clear();
+
+                on_use_need_move = true;
+                on_use_abs_err   = hold_target - pct;
+                on_use_linear    = true;
+            }
+        }
+    }
 
     void run(float time_E, uint64_t now_ms)
     {
@@ -758,7 +875,8 @@ public:
             (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ||
             (motion == filament_motion_enum::filament_motion_before_on_use) ||
             (motion == filament_motion_enum::filament_motion_stop_on_use) ||
-            post_on_use_10s;
+            post_on_use_10s ||
+            ((motion == filament_motion_enum::filament_motion_send) && send_stop_latch);
 
         bool  on_use_need_move = false;
         float on_use_abs_err   = 0.0f;
@@ -786,8 +904,12 @@ public:
                             {
                                 if (ks == 2u)
                                 {
-                                    dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
-                                    dm_auto_t0_ms[CHx] = now_ms;
+                                    if (dm_autoload_gate[CHx] == 0u)
+                                    {
+                                        dm_autoload_gate[CHx] = 1u;
+                                        dm_auto_state[CHx] = DM_AUTO_S1_DEBOUNCE;
+                                        dm_auto_t0_ms[CHx] = now_ms;
+                                    }
                                 }
                                 else if (ks == 1u)
                                 {
@@ -1076,37 +1198,21 @@ public:
                         const float err = pct - 49.0f;
 
                         on_use_need_move = true;
-                        on_use_abs_err   = (err < 0.0f) ? -err : err;
+                        on_use_abs_err   = -err;
 
-                        if (err < 0.0f && pct <= 51.6f && pct >= 50.0f)
-                        {
-                            float t = (51.6f - pct) / (51.6f - 50.0f);
-                            if (t < 0.0f) t = 0.0f;
-                            if (t > 1.0f) t = 1.0f;
+                        x = dir * PID_pressure.caculate(err, time_E);
 
-                            float pwm = 420.0f + (700.0f - 420.0f) * t;
+                        float lim_f = 500.0f + 80.0f * on_use_abs_err;
+                        if (lim_f > 900.0f) lim_f = 900.0f;
 
-                            x = -dir * pwm;
-                            PID_pressure.clear();
-                        }
-                        else
-                        {
-                            x = dir * PID_pressure.caculate(err, time_E);
-
-                            float lim_f = 500.0f + 80.0f * on_use_abs_err;
-                            if (lim_f > 900.0f) lim_f = 900.0f;
-
-                            if (x >  lim_f) x =  lim_f;
-                            if (x < -lim_f) x = -lim_f;
-                        }
-
-                        // tylko pchanie (zakaz cofania)
+                        if (x >  lim_f) x =  lim_f;
+                        if (x < -lim_f) x = -lim_f;
                         if (x * dir > 0.0f)
                         {
                             x = 0.0f;
                             PID_pressure.clear();
                             on_use_need_move = false;
-                            on_use_abs_err = 0.0f;
+                            on_use_abs_err   = 0.0f;
                         }
                     }
                 }
@@ -1180,72 +1286,17 @@ public:
             {
                 const float pct = MC_PULL_pct_f[CHx];
 
-                constexpr float hold_target = 54.0f;
-                constexpr float band_lo     = 53.7f;
-
-                float thresh = post_sendout_retract_thresh_pct;
-                if (thresh < hold_target) thresh = hold_target;
-
-                // RETRACT tylko gdy pct > thresh (jak before_pull_back)
-                if (pct > thresh)
-                {
-                    const float target = thresh;
-
-                    const float start_retract = target + 0.25f;
-                    const float stop_retract  = target + 0.00f;
-
-                    retract_hys_active = hyst_u8(retract_hys_active, pct, start_retract, stop_retract);
-
-                    if (!retract_hys_active)
-                    {
-                        x = 0.0f;
-                        PID_pressure.clear();
-                        on_use_need_move = false;
-                        on_use_abs_err   = 0.0f;
-                    }
-                    else
-                    {
-                        const float err = pct - target; // dodatni
-                        on_use_need_move = true;
-                        on_use_abs_err   = err;
-
-                        const float mag = retract_mag_from_err(err, 850.0f);
-
-                        x = dir * mag; // tylko cofanie
-                        if (x * dir < 0.0f) x = 0.0f;
-                    }
-                }
-                else
-                {
-                    retract_hys_active = 0;
-
-                    constexpr float push_hi_pct = band_lo;
-                    constexpr float push_lo_pct = 52.0f;
-                    constexpr float pwm_hi      = 600.0f;
-                    constexpr float pwm_lo      = 900.0f;
-                    constexpr float slope       = (pwm_lo - pwm_hi) / (push_hi_pct - push_lo_pct);
-
-                    if (pct >= push_hi_pct)
-                    {
-                        x = 0.0f;
-                        PID_pressure.clear();
-                        on_use_need_move = false;
-                        on_use_abs_err   = 0.0f;
-                    }
-                    else
-                    {
-                        float pwm;
-                        if (pct <= push_lo_pct) pwm = pwm_lo;
-                        else                    pwm = pwm_hi + (push_hi_pct - pct) * slope;
-
-                        x = -dir * pwm;
-                        PID_pressure.clear();
-
-                        on_use_need_move = true;
-                        on_use_abs_err   = hold_target - pct;
-                        on_use_linear    = true;
-                    }
-                }
+                hold_load(
+                    pct,
+                    dir,
+                    PID_pressure,
+                    post_sendout_retract_thresh_pct,
+                    retract_hys_active,
+                    x,
+                    on_use_need_move,
+                    on_use_abs_err,
+                    on_use_linear
+                );
             }
             else if (motion == filament_motion_enum::filament_motion_stop_on_use)
             {
@@ -1321,27 +1372,57 @@ public:
             {
                 const float pct = MC_PULL_pct_f[CHx];
 
-                constexpr float target_pct = 52.0f;
-                constexpr float band_lo    = 51.7f;
-                constexpr float band_hi    = 59.0f;
+                constexpr float target_pct = MC_ON_USE_TARGET_PCT;
+                constexpr float band_hi    = MC_ON_USE_BAND_HI_PCT;
 
-                constexpr float pwm_lo   = 420.0f;
+                float band_hi_eff = band_hi;
+
+                if (on_use_hi_gate_pct >= 0.0f)
+                {
+                    const bool gate_active =
+                        (on_use_hi_gate_t0_ms != 0ull) &&
+                        ((now_ms - on_use_hi_gate_t0_ms) < 5000ull);
+
+                    if (!gate_active)
+                    {
+                        on_use_hi_gate_pct   = -1.0f;
+                        on_use_hi_gate_t0_ms = 0ull;
+                    }
+                    else
+                    {
+                        if (pct > on_use_hi_gate_pct) on_use_hi_gate_pct = pct;
+
+                        const float d = on_use_hi_gate_pct - pct;
+                        if (d > 2.0f)
+                        {
+                            float ng = pct + 1.0f;
+                            if (ng < band_hi) ng = band_hi;
+                            if (ng > 100.0f)  ng = 100.0f;
+                            on_use_hi_gate_pct = ng;
+                        }
+
+                        if (on_use_hi_gate_pct > band_hi_eff) band_hi_eff = on_use_hi_gate_pct;
+                    }
+                }
+
+                constexpr float pwm_lo          = 380.0f;
                 constexpr float pct_fast_onuse  = 50.0f;
-                constexpr float pwm_fast_onuse  = 780.0f;
-                constexpr float pwm_cap  = 900.0f;
+                constexpr float pwm_fast_onuse  = 900.0f;
+                constexpr float pwm_cap         = 900.0f;
 
-                constexpr float slope = (pwm_fast_onuse - pwm_lo) / (band_lo - pct_fast_onuse);
+                constexpr float slope =
+                    (pwm_fast_onuse - pwm_lo) / ((target_pct - MC_ON_USE_BAND_LO_DELTA) - pct_fast_onuse);
 
                 retract_hys_active = 0;
 
-                if (pct >= band_lo && pct <= band_hi)
+                if (pct >= (target_pct - MC_ON_USE_BAND_LO_DELTA) && pct <= band_hi_eff)
                 {
                     x = 0.0f;
                     PID_pressure.clear();
                     on_use_need_move = false;
                     on_use_abs_err   = 0.0f;
                 }
-                else if (pct < band_lo)
+                else if (pct < (target_pct - MC_ON_USE_BAND_LO_DELTA))
                 {
                     const float err = pct - target_pct;
                     on_use_need_move = true;
@@ -1349,7 +1430,7 @@ public:
 
                     float pwm;
                     if (pct >= pct_fast_onuse)
-                        pwm = pwm_lo + (band_lo - pct) * slope;
+                        pwm = pwm_lo + ((target_pct - MC_ON_USE_BAND_LO_DELTA) - pct) * slope;
                     else
                         pwm = pwm_fast_onuse + (pct_fast_onuse - pct) * slope;
 
@@ -1400,17 +1481,31 @@ public:
 
                 if (motion == filament_motion_enum::filament_motion_send)
                 {
-                    const float FAST = (float)MC_PULL_SEND_FAST_PCT;
-                    const float STOP = (float)MC_PULL_SEND_STOP_PCT;
-
                     const float pct = MC_PULL_pct_f[CHx];
 
+                    if (!send_len_abort)
+                    {
+                        constexpr float SEND_MAX_M = 10.0f;
+                        const float moved_m = absf(ams[motion_control_ams_num].filament[CHx].meters - send_start_m);
+                        if (moved_m >= SEND_MAX_M) send_len_abort = 1;
+                    }
+
+                    if (send_len_abort)
+                    {
+                        PID_speed.clear();
+                        PID_pressure.clear();
+                        pwm_zeroed = 1;
+                        x_prev[CHx] = 0.0f;
+                        Motion_control_set_PWM(CHx, 0);
+                        return;
+                    }
+
                     // HARD STOP
-                    if (pct >= (float)MC_PULL_SEND_HARD_STOP_PCT)
+                    if (pct >= (float)MC_LOAD_S1_HARD_STOP_PCT)
                     {
                         send_hard = true;
-                        send_base = 0.0f;
                         PID_speed.clear();
+                        PID_pressure.clear();
                         pwm_zeroed = 1;
                         x_prev[CHx] = 0.0f;
                         Motion_control_set_PWM(CHx, 0);
@@ -1419,9 +1514,10 @@ public:
 
                     if (send_hard)
                     {
-                        if (pct >= (float)(MC_PULL_SEND_HARD_STOP_PCT - MC_PULL_SEND_HARD_HYS))
+                        if (pct >= (float)(MC_LOAD_S1_HARD_STOP_PCT - MC_LOAD_S1_HARD_HYS))
                         {
                             PID_speed.clear();
+                            PID_pressure.clear();
                             pwm_zeroed = 1;
                             x_prev[CHx] = 0.0f;
                             Motion_control_set_PWM(CHx, 0);
@@ -1430,16 +1526,17 @@ public:
                         send_hard = false;
                     }
 
-                    const float dpct = pct - send_pct_prev;
-                    send_pct_prev = pct;
-
-                    send_hold = (pct >= FAST);
-
-                    // latch przy STOP
-                    if (!send_stop_latch && pct >= (float)MC_PULL_SEND_STOP_PCT) {
+                    if (!send_stop_latch && (pct >= (float)MC_LOAD_S1_FAST_PCT))
+                    {
                         send_stop_latch = true;
-                        send_stop_brake_ms = now_ms;
-                        send_base = 0.0f;
+
+                        float p = pct;
+                        if (p < 0.0f) p = 0.0f;
+                        if (p > 100.0f) p = 100.0f;
+
+                        post_sendout_retract_thresh_pct = p;
+                        retract_hys_active = 0;
+
                         PID_speed.clear();
                         PID_pressure.clear();
                     }
@@ -1448,96 +1545,36 @@ public:
                     {
                         do_speed_pid = false;
 
-                        constexpr float target  = 53.0f;
-                        constexpr float wait_hi = 53.2f;
-                        constexpr float band_lo = 52.6f;
-                        constexpr float band_hi = 53.4f;
-
-                        if (pct > wait_hi)
-                        {
-                            x = 0.0f;
-                            PID_pressure.clear();
-                            PID_speed.clear();
-                            on_use_need_move = false;
-                            on_use_abs_err   = 0.0f;
-                        }
-                        else
-                        {
-                            if (pct >= band_lo && pct <= band_hi)
-                            {
-                                x = 0.0f;
-                                PID_pressure.clear();
-                                on_use_need_move = false;
-                                on_use_abs_err   = 0.0f;
-                            }
-                            else
-                            {
-                                on_use_need_move = true;
-
-                                const float err = pct - target;
-                                on_use_abs_err = (err < 0.0f) ? -err : err;
-
-                                x = dir * PID_pressure.caculate(err, time_E);
-
-                                float lim_f = 520.0f + 110.0f * on_use_abs_err;
-                                if (lim_f > 950.0f) lim_f = 950.0f;
-
-                                if (x >  lim_f) x =  lim_f;
-                                if (x < -lim_f) x = -lim_f;
-                            }
-                        }
-
+                        hold_load(
+                            pct,
+                            dir,
+                            PID_pressure,
+                            post_sendout_retract_thresh_pct,
+                            retract_hys_active,
+                            x,
+                            on_use_need_move,
+                            on_use_abs_err,
+                            on_use_linear
+                        );
                     }
-
-                    if (!send_stop_latch)
+                    else
                     {
-                        if (!send_hold)
+                        constexpr uint64_t SEND_SOFTSTART_MS = 300ull;
+                        constexpr float    V0 = 10.0f;
+                        constexpr float    V  = 60.0f;
+
+                        const uint64_t dt = (send_start_ms != 0) ? (now_ms - send_start_ms) : 1000000ull;
+
+                        if (dt < SEND_SOFTSTART_MS)
                         {
-                            speed_set = 60.0f;
+                            float t = (float)dt / (float)SEND_SOFTSTART_MS;
+                            if (t < 0.0f) t = 0.0f;
+                            if (t > 1.0f) t = 1.0f;
+                            speed_set = V0 + (V - V0) * t;
                         }
                         else
                         {
-                            const float e = STOP - pct;
-
-                            float u = (STOP - pct) / (STOP - FAST);
-                            if (u < 0.0f) u = 0.0f;
-                            if (u > 1.0f) u = 1.0f;
-                            const float sp_ff = 25.0f * u;
-
-                            constexpr float Ki = 70.0f;
-                            constexpr float base_max = 40.0f;
-
-                            if (dpct > 0.0f)
-                            {
-                                float k = time_E / 0.07f;
-                                if (k > 1.0f) k = 1.0f;
-                                send_base -= send_base * k;
-                            }
-                            else
-                            {
-                                if (e > 0.0f && pct < ((float)MC_PULL_SEND_STOP_PCT - 0.8f))
-                                    send_base += Ki * e * time_E;
-                            }
-
-                            if (send_base < 0.0f) send_base = 0.0f;
-                            if (send_base > base_max) send_base = base_max;
-
-                            constexpr float Kp = 4.0f;
-                            float sp_pi = Kp * e + send_base;
-
-                            float sp = (e <= 0.0f) ? 0.0f : sp_pi;
-                            if (sp < sp_ff) sp = sp_ff;
-
-                            if (e <= 5.0f)
-                            {
-                                if (sp > 9.0f) sp = 9.0f;
-                                if (sp < 0.0f) sp = 0.0f;
-                            }
-
-                            if (sp > 25.0f) sp = 25.0f;
-                            if (sp < 0.0f)  sp = 0.0f;
-
-                            speed_set = sp;
+                            speed_set = V;
                         }
                     }
                 }
@@ -1557,27 +1594,27 @@ public:
         }
 
         // stałe tryby
+        const bool pull_mode = (motion == filament_motion_enum::filament_motion_pull);
         const bool pb_mode = (motion == filament_motion_enum::filament_motion_before_pull_back);
+
+        const bool send_stop_hold_mode =
+            (motion == filament_motion_enum::filament_motion_send) && send_stop_latch;
 
         const bool hold_mode =
             (motion == filament_motion_enum::filament_motion_pressure_ctrl_idle) ||
             (motion == filament_motion_enum::filament_motion_pressure_ctrl_on_use) ||
             (motion == filament_motion_enum::filament_motion_before_on_use) ||
             (motion == filament_motion_enum::filament_motion_stop_on_use) ||
-            post_on_use_active;
-
-        const bool send_hold_mode = (motion == filament_motion_enum::filament_motion_send) && send_hold;
-
-        const bool pull_mode = (motion == filament_motion_enum::filament_motion_pull);
+            post_on_use_active ||
+            send_stop_hold_mode;
 
         const int deadband =
             pb_mode ? 0 :
-            (hold_mode ? 1 : (send_hold_mode ? 6 : (pull_mode ? 2 : 10)));
+            (hold_mode ? 1 : (pull_mode ? 2 : 10));
 
         float pwm0 =
             pb_mode ? 0.0f :
-            (hold_mode ? 420.0f :
-             (send_hold_mode ? 600.0f : pwm_zero));
+            (hold_mode ? 420.0f : pwm_zero);
 
         if (pull_mode)
         {
@@ -1696,16 +1733,11 @@ public:
         }
 
         const bool use_ramping =
-            (motion == filament_motion_enum::filament_motion_send) ||
+            ((motion == filament_motion_enum::filament_motion_send) && !send_stop_latch) ||
             (motion == filament_motion_enum::filament_motion_pull);
 
         if (use_ramping)
         {
-            const bool send_soft_start =
-                (motion == filament_motion_enum::filament_motion_send) &&
-                (send_start_ms != 0) &&
-                ((now_ms - send_start_ms) < 400ull);
-
             const bool pull_soft_start =
                 (motion == filament_motion_enum::filament_motion_pull) &&
                 (pull_start_ms != 0) &&
@@ -1716,16 +1748,10 @@ public:
 
             if (pull_soft_start) rate_up = 2500.0f;
 
-            if (send_soft_start && !send_hold) rate_up = 2500.0f;
-
             if (motion == filament_motion_enum::filament_motion_send)
             {
                 rate_down = 25000.0f;
-
-                if (!send_soft_start)
-                {
-                    rate_up = send_hold ? 10000.0f : 18000.0f;
-                }
+                rate_up   = 18000.0f;
             }
 
             float max_step_up   = rate_up   * time_E;
@@ -1740,24 +1766,6 @@ public:
 
             if (x < lo) x = lo;
             if (x > hi) x = hi;
-        }
-
-        // force minimum drive
-        if (motion == filament_motion_enum::filament_motion_send)
-        {
-            if (x != 0.0f && (x * dir) < 0.0f)
-            {
-                if (absf(x) < 700.0f)
-                    x = (x < 0.0f) ? -700.0f : 700.0f;
-            }
-        }
-        else if (motion == filament_motion_enum::filament_motion_before_on_use)
-        {
-            if (x != 0.0f && (x * dir) < 0.0f)
-            {
-                if (absf(x) < 600.0f)
-                    x = (x < 0.0f) ? -600.0f : 600.0f;
-            }
         }
 
         const int pwm_out = (int)x;
@@ -1809,12 +1817,11 @@ void AS5600_distance_updata()
     static uint32_t last_ticks = 0;
     static uint8_t  have_last_ticks = 0;
     static uint8_t  was_ok[4] = {0,0,0,0};
-
     static uint32_t last_stu_ticks = 0;
 
     const uint32_t now_ticks = time_ticks32();
-    const uint32_t tpm  = time_hw_ticks_per_ms();
-    const uint32_t tpus = time_hw_ticks_per_us();
+    const uint32_t tpm  = time_hw_tpms;
+    const uint32_t tpus = time_hw_tpus;
 
     if ((uint32_t)(now_ticks - last_stu_ticks) >= (200u * tpm))
     {
@@ -1833,7 +1840,6 @@ void AS5600_distance_updata()
     if (dt_ticks == 0) return;
     last_ticks = now_ticks;
 
-    // inv_dt = 1 / dt_s = 1e6*tpus / dt_ticks
     const float inv_dt = (1000000.0f * (float)tpus) / (float)dt_ticks;
 
     MC_AS5600.updata_angle();
@@ -1847,17 +1853,13 @@ void AS5600_distance_updata()
         {
             g_as5600_fail[i] = 0;
             if (g_as5600_okstreak[i] < 255) g_as5600_okstreak[i]++;
-
-            if (g_as5600_okstreak[i] >= kAS5600_OK_RECOVER)
-                g_as5600_good[i] = 1;
+            if (g_as5600_okstreak[i] >= kAS5600_OK_RECOVER) g_as5600_good[i] = 1;
         }
         else
         {
             g_as5600_okstreak[i] = 0;
             if (g_as5600_fail[i] < 255) g_as5600_fail[i]++;
-
-            if (g_as5600_fail[i] >= kAS5600_FAIL_TRIP)
-                g_as5600_good[i] = 0;
+            if (g_as5600_fail[i] >= kAS5600_FAIL_TRIP) g_as5600_good[i] = 0;
         }
 
         if (!AS5600_is_good(i))
@@ -2196,6 +2198,7 @@ static void motor_motion_run(int error)
                 dm_auto_remain_m[ch]     = 0.0f;
                 dm_auto_last_m[ch]       = 0.0f;
                 dm_loaded_drop_t0_ms[ch] = 0ull;
+                dm_autoload_gate[ch]     = 0u;
                 continue;
             }
 
@@ -2204,6 +2207,9 @@ static void motor_motion_run(int error)
             // (<0.6V)
             if (ks == 0u)
             {
+                if (filament_now_position[ch] == filament_idle)
+                    dm_autoload_gate[ch] = 0u;
+
                 dm_loaded[ch]            = 0u;
                 dm_fail_latch[ch]        = 0u;
                 dm_auto_state[ch]        = DM_AUTO_IDLE;
@@ -2619,6 +2625,38 @@ void Motion_control_init()
 
     MC_PULL_ONLINE_init();
     MC_PULL_ONLINE_read();
+
+    #if BMCU_DM_TWO_MICROSWITCH
+        for (uint8_t ch = 0; ch < kChCount; ch++)
+        {
+            if (!filament_channel_inserted[ch])
+            {
+                dm_loaded[ch]            = 1u;
+                dm_fail_latch[ch]        = 0u;
+                dm_auto_state[ch]        = DM_AUTO_IDLE;
+                dm_auto_try[ch]          = 0u;
+                dm_auto_t0_ms[ch]        = 0ull;
+                dm_auto_remain_m[ch]     = 0.0f;
+                dm_auto_last_m[ch]       = 0.0f;
+                dm_loaded_drop_t0_ms[ch] = 0ull;
+                dm_autoload_gate[ch]     = 0u;
+                continue;
+            }
+
+            const uint8_t ks = MC_ONLINE_key_stu[ch];
+
+            dm_autoload_gate[ch] = (ks != 0u) ? 1u : 0u;
+            dm_loaded[ch] = (ks == 1u) ? 1u : 0u;
+
+            dm_fail_latch[ch]        = 0u;
+            dm_auto_state[ch]        = DM_AUTO_IDLE;
+            dm_auto_try[ch]          = 0u;
+            dm_auto_t0_ms[ch]        = 0ull;
+            dm_auto_remain_m[ch]     = 0.0f;
+            dm_auto_last_m[ch]       = 0.0f;
+            dm_loaded_drop_t0_ms[ch] = 0ull;
+        }
+    #endif
 
     MC_AS5600.init(AS5600_SCL_PORT, AS5600_SCL_PIN,
                AS5600_SDA_PORT, AS5600_SDA_PIN,
